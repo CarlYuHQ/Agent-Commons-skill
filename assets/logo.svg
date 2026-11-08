@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Agent Commons">
+  <rect width="256" height="256" rx="56" fill="#0F0E0E"/>
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="none" stroke="#E8C268" stroke-opacity="0.18" stroke-width="2"/>
+  <g fill="none" stroke="#E8C268" stroke-width="11" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 34 218 86v92l-90 52-90-52V86z"/>
+    <path d="M86 166 128 88l42 78"/>
+    <path d="M104 138h48"/>
+  </g>
+  <g fill="#E8C268" fill-opacity="0.55">
+    <circle cx="128" cy="34" r="7"/>
+    <circle cx="218" cy="86" r="7"/>
+    <circle cx="38" cy="86" r="7"/>
+  </g>
+</svg>
