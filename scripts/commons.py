@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent Commons 本机存储、HTTP API 和命令行入口（Python 3.9+）。"""
+"""Agent Commons: local storage, HTTP API and command-line entry point (Python 3.9+, stdlib only)."""
 
 import sys
 sys.dont_write_bytecode = True
@@ -30,9 +30,19 @@ EVIDENCE_TYPES = ('conversation_reference', 'user_report', 'test_result', 'hypot
 ADOPTION_STATUSES = ('planned', 'applied', 'helped', 'failed')
 MAX_JSON_BYTES = 1024 * 1024
 MAX_BODY_CHARS = 100000
+MAX_SEARCH_LIMIT = 5
 POST_FIELDS = {'title', 'summary', 'category', 'tags', 'author', 'scope',
                'status', 'evidenceType', 'source', 'body'}
 ID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+
+# Query tokenizer: runs of CJK ideographs, or runs of other word characters.
+# Splitting the two keeps "README小改动" from becoming one unmatchable token.
+_CJK = '\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff'
+TOKEN_PATTERN = re.compile('[%s]+|[^\\W%s]+' % (_CJK, _CJK))
+LONG_CJK_PATTERN = re.compile('[%s]{3,}' % _CJK)
+# A long CJK term without exact hit still counts when at least this share of its
+# adjacent character pairs appear (a cheap, offline substitute for word segmentation).
+PARTIAL_CJK_THRESHOLD = 0.5
 
 
 class CommonsError(Exception):
@@ -64,33 +74,33 @@ def body_hash(body):
 
 def valid_id(value):
     if not isinstance(value, str) or not ID_PATTERN.fullmatch(value):
-        raise CommonsError(400, '帖子 id 必须是小写 UUID v4，不能包含路径。')
+        raise CommonsError(400, 'Post id must be a lowercase UUID v4 and must not contain a path.')
     return value
 
 
 def text(value, field, limit=4000, required=False):
     if not isinstance(value, str):
-        raise CommonsError(400, field + ' 必须是字符串。')
+        raise CommonsError(400, field + ' must be a string.')
     if len(value) > limit or (required and not value.strip()):
-        raise CommonsError(400, field + ' 不能为空或超过长度限制（%d 字符）。' % limit)
+        raise CommonsError(400, field + ' must not be empty or longer than %d characters.' % limit)
     try:
         value.encode('utf-8')
     except UnicodeEncodeError:
-        raise CommonsError(400, field + ' 含有无效 Unicode 字符。')
+        raise CommonsError(400, field + ' contains invalid Unicode.')
     return value
 
 
 def enum(value, values, field):
     if not isinstance(value, str) or value not in values:
-        raise CommonsError(400, field + ' 必须是以下值之一：' + ', '.join(values))
+        raise CommonsError(400, field + ' must be one of: ' + ', '.join(values))
     return value
 
 
 def obj(value, field, allowed):
     if not isinstance(value, dict):
-        raise CommonsError(400, field + ' 必须是 JSON 对象。')
+        raise CommonsError(400, field + ' must be a JSON object.')
     if set(value) - set(allowed):
-        raise CommonsError(400, field + ' 含有未知字段。')
+        raise CommonsError(400, field + ' contains unknown fields.')
     return value
 
 
@@ -102,13 +112,18 @@ def actor(value, field='actor'):
 
 
 def actor_key(value):
-    # 模型、框架和 label 构成唯一身份；切换 kind 不能重复点赞或重复计数。
+    # model + framework + label form the identity; switching `kind` must not
+    # allow a second like or a second adoption count.
     return encode_json([value[k] for k in ('model', 'framework', 'label')])
 
 
 def has_verification(source):
+    """Heuristic gate for `validated`: the source must describe a check and its result.
+
+    Keywords are bilingual on purpose: records may be written in English or Chinese.
+    """
     lowered = source.casefold()
-    if re.search(r'未验证|未经验证|尚未验证|待验证|未测试|未经测试|not\s+(verified|tested)|unverified', lowered):
+    if re.search(r'未验证|未经验证|尚未验证|待验证|未测试|未经测试|not\s+(verified|tested)|unverified|untested', lowered):
         return False
     return (len(source.strip()) >= 12
             and bool(re.search(r'验证|测试|复现|核验|实测|verify|verified|test|reproduced', lowered))
@@ -122,7 +137,7 @@ def validate_post(value):
     category = enum(value.get('category'), CATEGORIES, 'category')
     tags = value.get('tags', [])
     if not isinstance(tags, list) or len(tags) > 50:
-        raise CommonsError(400, 'tags 必须是最多 50 个字符串的列表。')
+        raise CommonsError(400, 'tags must be a list of at most 50 strings.')
     tags = [text(tag, 'tags[]', 100, True) for tag in tags]
     author = actor(value.get('author'), 'author')
     scope = obj(value.get('scope', {}), 'scope', ('project', 'applicable', 'avoid'))
@@ -132,48 +147,63 @@ def validate_post(value):
     source = text(value.get('source', ''), 'source', 10000)
     body = text(value.get('body'), 'body', MAX_BODY_CHARS)
     if status == 'validated' and evidence != 'test_result' and not has_verification(source):
-        raise CommonsError(400, 'validated 必须使用 test_result，或在 source 中填写明确的验证过程与结果。')
+        raise CommonsError(400, 'validated requires evidenceType test_result, or a source that '
+                                'describes an explicit verification procedure and its result.')
     return dict(title=title, summary=summary, category=category, tags=tags, author=author,
                 scope=scope, status=status, evidenceType=evidence, source=source, body=body)
 
 
 def decode_json(raw):
     if len(raw) > MAX_JSON_BYTES:
-        raise CommonsError(400, 'JSON 请求不能超过 1MB。')
+        raise CommonsError(400, 'JSON payload must not exceed 1 MB.')
 
     def pairs(items):
         result = {}
         for key, value in items:
             if key in result:
-                raise ValueError('重复字段')
+                raise ValueError('duplicate key')
             result[key] = value
         return result
 
     def invalid_constant(value):
-        raise ValueError('非法数字')
+        raise ValueError('invalid number')
 
     try:
         value = json.loads(raw.decode('utf-8'), object_pairs_hook=pairs,
                            parse_constant=invalid_constant)
     except (ValueError, UnicodeError, RecursionError):
-        raise CommonsError(400, '请求必须是有效 UTF-8 JSON，不能含重复字段或非法数字。')
+        raise CommonsError(400, 'Payload must be valid UTF-8 JSON without duplicate keys or NaN/Infinity.')
     if not isinstance(value, dict):
-        raise CommonsError(400, '请求必须是 JSON 对象。')
+        raise CommonsError(400, 'Payload must be a JSON object.')
     return value
 
 
 def resolve_root(explicit=None):
-    # 这里只计算路径；只有创建存储实例时才会建立目录。
+    # Only computes the path; directories are created when a store is opened.
     chosen = os.fspath(explicit) if explicit is not None else os.environ.get('AGENT_COMMONS_HOME')
     if explicit is not None and (not isinstance(chosen, str) or not chosen.strip()):
-        raise CommonsError(400, '--root 必须是非空目录路径。')
+        raise CommonsError(400, '--root must be a non-empty directory path.')
     chosen = chosen or '~/.agent-commons'
     if '\x00' in chosen:
-        raise CommonsError(400, '根目录路径不能包含空字节。')
+        raise CommonsError(400, 'Root path must not contain NUL bytes.')
     try:
         return Path(chosen).expanduser().resolve()
     except (OSError, ValueError, RuntimeError):
-        raise CommonsError(400, '无法解析根目录路径。')
+        raise CommonsError(400, 'Root path cannot be resolved.')
+
+
+def query_terms(query):
+    return TOKEN_PATTERN.findall(query.casefold())
+
+
+def term_coverage(term, haystack):
+    """1.0 for an exact hit; for long CJK terms, the share of adjacent pairs that hit."""
+    if term in haystack:
+        return 1.0
+    if LONG_CJK_PATTERN.fullmatch(term):
+        pairs = [term[i:i + 2] for i in range(len(term) - 1)]
+        return sum(pair in haystack for pair in pairs) / len(pairs)
+    return 0.0
 
 
 def _fsync_directory(directory):
@@ -185,7 +215,7 @@ def _fsync_directory(directory):
 
 
 def atomic_write(path, data):
-    """同目录临时文件、fsync、replace；不沿着目标符号链接写入。"""
+    """Temp file in the same directory, fsync, replace; never writes through a symlink target."""
     path = Path(path)
     fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=str(path.parent))
     try:
@@ -205,14 +235,14 @@ def safe_read(path, limit):
         fd = os.open(str(path), os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
         with os.fdopen(fd, 'rb') as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                raise CommonsError(500, '存储文件必须是普通文件，不能是链接或设备。')
+                raise CommonsError(500, 'Storage files must be regular files, not links or devices.')
             data = handle.read(limit + 1)
     except FileNotFoundError:
-        raise CommonsError(500, '正文或存储文件缺失，请检查本地文件。')
+        raise CommonsError(500, 'A body or storage file is missing; check the local files.')
     except OSError:
-        raise CommonsError(500, '无法安全读取本地文件，不能使用符号链接。')
+        raise CommonsError(500, 'Cannot read the local file safely; symlinks are not allowed.')
     if len(data) > limit:
-        raise CommonsError(400, '文件超过允许的长度。')
+        raise CommonsError(400, 'File exceeds the allowed size.')
     return data
 
 
@@ -244,15 +274,15 @@ CREATE TABLE IF NOT EXISTS adoptions (
     PRIMARY KEY(post_id, actor_key, task_id)
 );
 CREATE TRIGGER IF NOT EXISTS revisions_no_update BEFORE UPDATE ON revisions
-BEGIN SELECT RAISE(ABORT, '历史快照不能修改'); END;
+BEGIN SELECT RAISE(ABORT, 'revision snapshots are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS revisions_no_delete BEFORE DELETE ON revisions
-BEGIN SELECT RAISE(ABORT, '历史快照不能删除'); END;
+BEGIN SELECT RAISE(ABORT, 'revision snapshots cannot be deleted'); END;
 PRAGMA user_version = 1;
 """
 
 
 class CommonsStore:
-    """Markdown 是唯一当前正文；DB 的 revisions 仅作不可变复核快照。"""
+    """posts/<id>.md is the only current body; DB revisions are immutable snapshots for review."""
 
     def __init__(self, root=None):
         self.root = resolve_root(root)
@@ -264,14 +294,14 @@ class CommonsStore:
             self.root.mkdir(parents=True, exist_ok=True)
         for path in (self.posts_dir, self.journal_dir):
             if path.is_symlink():
-                raise CommonsError(500, '存储子目录不能是符号链接。')
+                raise CommonsError(500, 'Storage subdirectories must not be symlinks.')
             if not path.is_dir():
                 path.mkdir(exist_ok=True)
         self._check_paths()
         with self._connection() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version not in (0, 1):
-                raise CommonsError(500, '不支持该本地数据库版本。')
+                raise CommonsError(500, 'Unsupported local database version.')
             db.executescript(SCHEMA)
         with self._transaction():
             pass
@@ -279,10 +309,10 @@ class CommonsStore:
     def _check_paths(self):
         for path in (self.posts_dir, self.journal_dir, self.db_path):
             if path.is_symlink() or path.parent.resolve() != self.root:
-                raise CommonsError(500, '存储路径不安全，不能使用符号链接。')
+                raise CommonsError(500, 'Unsafe storage path; symlinks are not allowed.')
         for suffix in ('-journal', '-wal', '-shm'):
             if Path(str(self.db_path) + suffix).is_symlink():
-                raise CommonsError(500, '数据库辅助文件不能是符号链接。')
+                raise CommonsError(500, 'SQLite side files must not be symlinks.')
 
     @contextlib.contextmanager
     def _connection(self):
@@ -301,12 +331,13 @@ class CommonsStore:
         _fsync_directory(self.journal_dir)
 
     def _recover(self, db):
-        # BEGIN IMMEDIATE 同时锁住其他进程；崩溃遗留事务在任何读取前恢复。
+        # BEGIN IMMEDIATE also locks out other processes, so transactions left by
+        # a crash are recovered before any read happens.
         for journal in sorted(self.journal_dir.glob('*.json')):
             item = decode_json(safe_read(journal, MAX_JSON_BYTES))
             pid = valid_id(item.get('id'))
             if journal.name != pid + '.json':
-                raise CommonsError(500, '原子写恢复记录的 id 与文件名不一致。')
+                raise CommonsError(500, 'Recovery journal id does not match its file name.')
             row = db.execute('SELECT * FROM posts WHERE id=?', (pid,)).fetchone()
             path = self.posts_dir / (pid + '.md')
             current = self._read_body(pid) if os.path.lexists(path) else None
@@ -314,7 +345,8 @@ class CommonsStore:
             committed = (row is not None and row['revision'] == item['targetRevision']
                          and row['body_hash'] == item['targetHash'])
             if not committed:
-                # 只恢复仍与本次写入相同的文件；不覆盖崩溃后用户另行修改的正文。
+                # Only roll back a file that still holds this write; never clobber a
+                # body that a human edited after the crash.
                 if current_hash == item['targetHash'] or current is None:
                     previous = item['previousBody']
                     if previous is None:
@@ -322,9 +354,10 @@ class CommonsStore:
                             path.unlink()
                             _fsync_directory(self.posts_dir)
                     else:
-                        atomic_write(path, text(previous, '恢复正文', MAX_BODY_CHARS).encode('utf-8'))
+                        atomic_write(path, text(previous, 'recovered body', MAX_BODY_CHARS).encode('utf-8'))
                 elif row is None:
-                    raise CommonsError(500, '未提交帖子正文已被外部修改，请人工复核恢复记录。')
+                    raise CommonsError(500, 'An uncommitted post body was modified externally; '
+                                            'review the recovery journal manually.')
             self._remove_journal(journal)
 
     @contextlib.contextmanager
@@ -347,7 +380,8 @@ class CommonsStore:
                 self._recover_after_failure(db)
                 raise
             else:
-                # 提交后清理日志；清理失败不将已经提交的操作误报为失败。
+                # Clean the journal after commit; a cleanup failure must not report
+                # an already committed operation as failed.
                 try:
                     self._recover_after_failure(db)
                 except (OSError, CommonsError, sqlite3.Error):
@@ -368,13 +402,13 @@ class CommonsStore:
         try:
             body = raw.decode('utf-8')
         except UnicodeError:
-            raise CommonsError(400, '手动编辑的 Markdown 必须是 UTF-8。')
-        return text(body, '正文', MAX_BODY_CHARS)
+            raise CommonsError(400, 'Hand-edited Markdown must be UTF-8.')
+        return text(body, 'body', MAX_BODY_CHARS)
 
     def _row(self, db, pid):
         row = db.execute('SELECT * FROM posts WHERE id=?', (valid_id(pid),)).fetchone()
         if row is None:
-            raise CommonsError(404, '帖子不存在。')
+            raise CommonsError(404, 'Post not found.')
         return row
 
     def _snapshot(self, db, row, body):
@@ -383,6 +417,7 @@ class CommonsStore:
                     row['revision_source'], row['updated_at']))
 
     def _sync(self, db, pid):
+        """Pick up hand edits of posts/<id>.md as a new `external_edit` revision."""
         row = self._row(db, pid)
         body = self._read_body(pid)
         digest = body_hash(body)
@@ -400,11 +435,12 @@ class CommonsStore:
         recovery = dict(id=pid, previousBody=previous, targetHash=body_hash(body),
                         targetRevision=revision)
         atomic_write(journal, encode_json(recovery).encode('utf-8'))
-        # 外部编辑不遵循 SQLite 锁；在替换前再次核对，发现变化则留下正文。
+        # External editors ignore SQLite locks: re-check right before replacing and
+        # keep the file untouched if it changed.
         actual = self._read_body(pid) if os.path.lexists(path) else None
         if actual != previous:
             self._remove_journal(journal)
-            raise CommonsError(409, '正文在保存期间被外部修改，请重新读取后编辑。')
+            raise CommonsError(409, 'The body was modified externally while saving; read it again before editing.')
         atomic_write(path, body.encode('utf-8'))
 
     def _post(self, db, row, body):
@@ -438,7 +474,7 @@ class CommonsStore:
         timestamp = now()
         with self._transaction() as db:
             if os.path.lexists(self.posts_dir / (pid + '.md')):
-                raise CommonsError(409, '新帖子文件已存在。')
+                raise CommonsError(409, 'A file for the new post already exists.')
             db.execute('INSERT INTO posts VALUES (?,?,?,?,?,?,?)',
                        (pid, encode_json(content), body_hash(body), 1, 'created', timestamp, timestamp))
             row = self._row(db, pid)
@@ -459,12 +495,12 @@ class CommonsStore:
         value = obj(value, 'PATCH', POST_FIELDS | {'expectedRevision'})
         expected = value.get('expectedRevision')
         if type(expected) is not int or expected < 1:
-            raise CommonsError(400, 'expectedRevision 必须是正整数。')
+            raise CommonsError(400, 'expectedRevision must be a positive integer.')
         with self._transaction() as db:
             row, old_body = self._sync(db, pid)
             if row['revision'] != expected:
-                # 外部正文同步必须提交，不能随 409 一起回滚。
-                raise CommonsError(409, '版本已变化，请重新读取并复核后再编辑。',
+                # The external-edit sync must be committed, not rolled back with the 409.
+                raise CommonsError(409, 'The revision has changed; read it again and review before editing.',
                                    commit_changes=True, currentRevision=row['revision'])
             merged = dict(json.loads(row['metadata']), body=old_body)
             merged.update({key: value[key] for key in POST_FIELDS if key in value})
@@ -500,7 +536,7 @@ class CommonsStore:
         value = obj(value, 'like', ('actor', 'liked'))
         who = actor(value.get('actor'))
         if type(value.get('liked')) is not bool:
-            raise CommonsError(400, 'liked 必须是布尔值。')
+            raise CommonsError(400, 'liked must be a boolean.')
         with self._transaction() as db:
             self._sync(db, pid)
             if value['liked']:
@@ -545,29 +581,30 @@ class CommonsStore:
                     db.execute('SELECT * FROM revisions WHERE post_id=? ORDER BY revision', (pid,))]
 
     @staticmethod
-    def _matches(post, query):
+    def _relevance(post, terms):
+        """Mean coverage of query terms over the searchable text, in [0, 1]."""
+        if not terms:
+            return 0.0
         haystack = '\n'.join([post['title'], post['summary'], post['body'], post['source'],
                               ' '.join(post['tags']), *post['scope'].values()]).casefold()
-        groups = re.findall(r'[\u3400-\u9fff]+|[\w]+', query.casefold())
-        if not groups:
-            return False
-        for group in groups:
-            if group in haystack:
-                continue
-            if re.fullmatch(r'[\u3400-\u9fff]{3,}', group):
-                # 中文长词允许相邻双字全部命中，不调用云端分词服务。
-                if all(group[i:i + 2] in haystack for i in range(len(group) - 1)):
-                    continue
-            return False
-        return True
+        total = 0.0
+        for term in terms:
+            coverage = term_coverage(term, haystack)
+            if coverage >= PARTIAL_CJK_THRESHOLD:
+                total += coverage
+        return total / len(terms)
 
     def list_posts(self, query='', category='', author='', status=''):
+        """Full posts for the web UI. A query is a strict filter: every term must match."""
         query = text(query, 'q')
         author = text(author, 'author', 800)
         if category:
             enum(category, CATEGORIES, 'category')
         if status:
             enum(status, STATUSES, 'status')
+        terms = query_terms(query)
+        if query.strip() and not terms:
+            return []
         with self._transaction() as db:
             result = []
             ids = [row['id'] for row in db.execute('SELECT id FROM posts ORDER BY updated_at DESC,id')]
@@ -580,23 +617,33 @@ class CommonsStore:
                     continue
                 if author and author.casefold() not in ' '.join(post['author'].values()).casefold():
                     continue
-                if query and not self._matches(post, query):
+                if terms and self._relevance(post, terms) < 1.0:
                     continue
                 result.append(post)
         return sorted(result, key=lambda item: (item['updatedAt'], item['id']), reverse=True)
 
-    def search(self, query, limit=5, category='', project=''):
+    def search(self, query, limit=MAX_SEARCH_LIMIT, category='', project=''):
+        """Agent search: up to five summaries, ranked by scope, relevance, then evidence.
+
+        Unlike list_posts, a post that matches only part of the query is still a
+        candidate (with lower relevance), so one unmatched word does not hide it.
+        A query that matches nothing returns nothing; there is no fallback list.
+        """
         text(query, 'query')
         text(project, 'project')
-        if type(limit) is not int or not 1 <= limit <= 5:
-            raise CommonsError(400, 'limit 必须是 1 到 5 的整数。')
+        if type(limit) is not int or not 1 <= limit <= MAX_SEARCH_LIMIT:
+            raise CommonsError(400, 'limit must be an integer from 1 to %d.' % MAX_SEARCH_LIMIT)
         if category:
             enum(category, CATEGORIES, 'category')
-        if not query.strip():
+        terms = query_terms(query)
+        if not terms:
             return []
         candidates = []
-        for post in self.list_posts(query=query, category=category):
+        for post in self.list_posts(category=category):
             if post['status'] in ('draft', 'archived'):
+                continue
+            relevance = self._relevance(post, terms)
+            if relevance <= 0:
                 continue
             scope = post['scope']
             scope_score = 1
@@ -615,11 +662,13 @@ class CommonsStore:
             if has_verification(post['source']):
                 evidence_score = max(evidence_score, 3)
             status_score = {'validated': 3, 'observed': 2, 'disputed': 1}[post['status']]
-            # 热度仅作末位排序因素，既不替代适用范围也不自动升级状态。
-            rank = (scope_score, evidence_score, status_score, post['helpedCount'],
+            # Popularity is only a final tie-breaker: it never replaces scope or
+            # relevance, and never upgrades status.
+            rank = (scope_score, round(relevance, 3), evidence_score, status_score, post['helpedCount'],
                     post['adoptionCount'], post['likeCount'], post['updatedAt'], post['id'])
             brief = {key: value for key, value in post.items()
                      if key not in ('body', 'likes', 'comments', 'adoptions', 'revisionHistory')}
+            brief['relevance'] = round(relevance, 2)
             candidates.append((rank, brief))
         candidates.sort(key=lambda item: item[0], reverse=True)
         return [item[1] for item in candidates[:limit]]
@@ -634,7 +683,7 @@ class CommonsHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, store, port=8765, assets_dir=None):
         if type(port) is not int or not 0 <= port <= 65535:
-            raise CommonsError(400, 'port 必须是 0 到 65535 的整数。')
+            raise CommonsError(400, 'port must be an integer from 0 to 65535.')
         self.store = store
         self.csrf_token = secrets.token_urlsafe(32)
         self.index_path = (Path(assets_dir) if assets_dir is not None else
@@ -665,7 +714,7 @@ class CommonsHandler(BaseHTTPRequestHandler):
         self.connection.settimeout(10)
 
     def log_message(self, format, *args):
-        # 不记录请求、正文、身份或令牌，避免日志泄漏和遥测。
+        # Never log requests, bodies, identities or tokens: no leaks, no telemetry.
         pass
 
     def _send(self, status, value, content_type='application/json; charset=utf-8'):
@@ -684,13 +733,14 @@ class CommonsHandler(BaseHTTPRequestHandler):
 
     def send_error(self, code, message=None, explain=None):
         self.close_connection = True
-        self._send(code, CommonsError(code, 'HTTP 请求格式或方法不受支持。', code='http_error').as_json())
+        self._send(code, CommonsError(code, 'Malformed HTTP request or unsupported method.',
+                                      code='http_error').as_json())
 
     def _guard(self, mutation):
         hosts = self.headers.get_all('Host', [])
         origins = self.headers.get_all('Origin', [])
         if len(hosts) != 1 or len(origins) > 1:
-            raise CommonsError(403, '必须使用唯一的本机 Host/Origin。')
+            raise CommonsError(403, 'Exactly one loopback Host and at most one Origin header are required.')
         try:
             host_value = hosts[0]
             if any(char.isspace() for char in host_value):
@@ -709,29 +759,30 @@ class CommonsHandler(BaseHTTPRequestHandler):
                         or any(char.isspace() for char in origins[0])):
                     raise ValueError()
         except (ValueError, TypeError):
-            raise CommonsError(403, '拒绝非本机或端口不匹配的 Host/Origin；不提供 CORS。')
+            raise CommonsError(403, 'Rejected non-loopback or port-mismatched Host/Origin; CORS is not offered.')
         if mutation:
             tokens = self.headers.get_all('X-Commons-Token', [])
-            if len(tokens) != 1 or not hmac.compare_digest(tokens[0].encode('utf-8'), self.server.csrf_token.encode('ascii')):
-                raise CommonsError(403, '写入需要 config 返回的 X-Commons-Token。')
+            if len(tokens) != 1 or not hmac.compare_digest(tokens[0].encode('utf-8'),
+                                                           self.server.csrf_token.encode('ascii')):
+                raise CommonsError(403, 'Writes require the X-Commons-Token returned by /api/config.')
 
     def _json_body(self):
         lengths = self.headers.get_all('Content-Length', [])
         if self.headers.get('Transfer-Encoding') or len(lengths) != 1:
-            raise CommonsError(400, 'JSON 请求必须带唯一 Content-Length，不支持分块传输。')
+            raise CommonsError(400, 'JSON requests need exactly one Content-Length; chunked transfer is not supported.')
         if not re.fullmatch(r'[0-9]+', lengths[0]) or len(lengths[0]) > 10:
-            raise CommonsError(400, 'Content-Length 不合法。')
+            raise CommonsError(400, 'Invalid Content-Length.')
         size = int(lengths[0])
         if size > MAX_JSON_BYTES:
-            raise CommonsError(400, 'JSON 请求不能超过 1MB。')
+            raise CommonsError(400, 'JSON payload must not exceed 1 MB.')
         if self.headers.get_content_type() != 'application/json':
-            raise CommonsError(400, 'Content-Type 必须是 application/json。')
+            raise CommonsError(400, 'Content-Type must be application/json.')
         try:
             raw = self.rfile.read(size)
         except OSError:
-            raise CommonsError(400, '读取 JSON 请求超时或失败。')
+            raise CommonsError(400, 'Reading the JSON request timed out or failed.')
         if len(raw) != size:
-            raise CommonsError(400, 'JSON 请求长度与 Content-Length 不符。')
+            raise CommonsError(400, 'JSON body length does not match Content-Length.')
         return decode_json(raw)
 
     def _route(self):
@@ -745,17 +796,17 @@ class CommonsHandler(BaseHTTPRequestHandler):
             path = unquote(parsed.path, encoding='utf-8', errors='strict')
             params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=20)
         except (ValueError, UnicodeError):
-            raise CommonsError(400, '请求路径或查询参数不合法。')
+            raise CommonsError(400, 'Invalid request path or query string.')
         store = self.server.store
         if method == 'GET' and path in ('/', '/index.html'):
             if not self.server.index_path.exists():
-                raise CommonsError(404, 'assets/index.html 尚未提供。')
+                raise CommonsError(404, 'assets/index.html is not available.')
             return 200, safe_read(self.server.index_path, 5 * MAX_JSON_BYTES), 'text/html; charset=utf-8'
         if method == 'GET' and path == '/api/config':
             return 200, dict(csrfToken=self.server.csrf_token, root=str(store.root), categories=CATEGORIES), None
         if method == 'GET' and path == '/api/posts':
             if set(params) - {'q', 'category', 'author', 'status'} or any(len(v) != 1 for v in params.values()):
-                raise CommonsError(400, '帖子列表只接受单个 q/category/author/status 参数。')
+                raise CommonsError(400, 'The post list accepts at most one each of q, category, author and status.')
             values = {key: params.get(key, [''])[0] for key in ('q', 'category', 'author', 'status')}
             return 200, {'posts': store.list_posts(query=values['q'], category=values['category'],
                                                    author=values['author'], status=values['status'])}, None
@@ -777,7 +828,7 @@ class CommonsHandler(BaseHTTPRequestHandler):
                           ('PUT', 'adoptions'): store.adopt}.get((method, parts[1]))
                 if action:
                     return 200, {'post': action(pid, self._json_body())}, None
-        raise CommonsError(404, '接口或页面不存在；不提供任意磁盘文件。')
+        raise CommonsError(404, 'No such endpoint or page; arbitrary files are never served.')
 
     def _handle(self):
         try:
@@ -790,7 +841,7 @@ class CommonsHandler(BaseHTTPRequestHandler):
             self.close_connection = True
         except Exception:
             self.close_connection = True
-            self._send(500, CommonsError(500, '本地存储或服务处理失败；未提交的写入将回滚。').as_json())
+            self._send(500, CommonsError(500, 'Local storage or server failure; uncommitted writes were rolled back.').as_json())
 
     do_GET = _handle
     do_POST = _handle
@@ -803,33 +854,33 @@ class CommonsHandler(BaseHTTPRequestHandler):
 
 class JSONArgumentParser(argparse.ArgumentParser):
     def error(self, message):
-        raise CommonsError(400, '命令行参数不合法，请用 --help 查看子命令、必填参数和参数类型。', code='cli_arguments')
+        raise CommonsError(400, 'Invalid command-line arguments; run --help for subcommands, '
+                                'required arguments and types.', code='cli_arguments')
 
     def print_help(self, file=None):
         print(encode_json({'help': self.format_help()}), file=file or sys.stdout)
 
 
 def build_parser():
-    parser = JSONArgumentParser(description='仅供本机使用的 Agent Commons 社区存储。')
-    parser.add_argument('--root', help='根目录；须放在子命令之前。')
+    parser = JSONArgumentParser(description='Agent Commons: a local, evidence-first experience store.')
+    parser.add_argument('--root', help='Data directory; must come before the subcommand.')
     commands = parser.add_subparsers(dest='command', required=True, parser_class=JSONArgumentParser)
-    commands.add_parser('init', help='初始化指定本机存储。')
-    search = commands.add_parser('search', help='只返回匹配结果的前五条摘要。')
+    commands.add_parser('init', help='Initialize the data directory.')
+    search = commands.add_parser('search', help='Return at most five ranked summaries (no bodies).')
     search.add_argument('--query', required=True)
-    search.add_argument('--limit', type=int, default=5)
-    search.add_argument('--limit5', dest='limit', action='store_const', const=5)
+    search.add_argument('--limit', type=int, default=MAX_SEARCH_LIMIT)
     search.add_argument('--category', default='')
     search.add_argument('--project', default='')
-    read = commands.add_parser('read', help='读取完整帖子。')
+    read = commands.add_parser('read', help='Read one full post.')
     read.add_argument('id')
     for name in ('post', 'edit', 'comment', 'like', 'adopt'):
-        command = commands.add_parser(name, help='从 JSON 文件读取内容并写入本机存储。')
+        command = commands.add_parser(name, help='Read a JSON file and write it to the store.')
         if name != 'post':
             command.add_argument('id')
         command.add_argument('--file', required=True)
-    export = commands.add_parser('export', help='导出全部完整帖子。')
+    export = commands.add_parser('export', help='Export all full posts as JSON.')
     export.add_argument('--output', required=True)
-    serve = commands.add_parser('serve', help='只绑定 127.0.0.1 的本机 API 与页面。')
+    serve = commands.add_parser('serve', help='Serve the API and web page on 127.0.0.1 only.')
     serve.add_argument('--port', type=int, default=8765)
     return parser
 
@@ -856,9 +907,9 @@ def main(argv=None):
             result = store.export()
             output = Path(args.output).expanduser().absolute()
             if not output.parent.is_dir():
-                raise CommonsError(400, '导出文件的父目录不存在。')
+                raise CommonsError(400, 'The parent directory of the export file does not exist.')
             if output.resolve() == store.db_path or output.parent.resolve() in (store.posts_dir, store.journal_dir):
-                raise CommonsError(400, '导出文件不能覆盖存储数据库、正文或恢复日志。')
+                raise CommonsError(400, 'The export must not overwrite the database, post bodies or recovery journal.')
             atomic_write(output, encode_json(result).encode('utf-8'))
             result = {'output': str(output), 'schemaVersion': 1, 'postCount': len(result['posts'])}
         else:
@@ -876,7 +927,7 @@ def main(argv=None):
         print(encode_json(error.as_json()))
         return 2 if error.status < 500 else 1
     except (OSError, sqlite3.Error, ValueError):
-        print(encode_json(CommonsError(500, '本地文件或数据库操作失败，请检查路径和权限。').as_json()))
+        print(encode_json(CommonsError(500, 'Local file or database operation failed; check paths and permissions.').as_json()))
         return 1
 
 

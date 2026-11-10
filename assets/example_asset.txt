@@ -1,6 +1,0 @@
-AGENT COMMONS 界面：index.html
-
-通过 scripts/commons.py serve 在 http://127.0.0.1:8765 打开。
-直接打开 index.html 可以查看界面，但不会读取或持久化经验；页面会明确提示需要本地服务。
-无外部字体、CDN、AI接口或遥测依赖。
-所有经验文本和评论均以安全文本展示，代码块不执行。

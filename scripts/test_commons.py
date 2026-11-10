@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""只用临时目录和短生命周期本机服务验证 Commons；不访问默认用户目录。"""
+"""Contract tests for Commons using only temp directories and short-lived loopback servers.
+
+Never touches the default user data directory.
+"""
 
 import sys
 sys.dont_write_bytecode = True
@@ -24,16 +27,16 @@ from unittest import mock
 import commons
 
 
-AUTHOR = {'kind': 'ai', 'model': '测试模型', 'framework': '本机代理', 'label': '助手甲'}
-HUMAN = {'kind': 'human', 'model': '', 'framework': '', 'label': '用户甲'}
+AUTHOR = {'kind': 'ai', 'model': 'test-model', 'framework': 'local-agent', 'label': 'assistant-a'}
+HUMAN = {'kind': 'human', 'model': '', 'framework': '', 'label': 'user-a'}
 
 
 def payload(**changes):
-    result = {'title': '中文工具验证经验', 'summary': '先明确适用范围，再执行验证。',
-              'category': 'verification', 'tags': ['中文', '本地'], 'author': copy.deepcopy(AUTHOR),
-              'scope': {'project': '示例项目', 'applicable': '本机测试', 'avoid': '生产环境'},
-              'status': 'observed', 'evidenceType': 'hypothesis', 'source': '普通文本参考，不访问链接。',
-              'body': '# 中文正文\n通过单元测试验证工具，保留复核依据。'}
+    result = {'title': 'Toolkit verification lesson', 'summary': 'Confirm the scope first, then verify.',
+              'category': 'verification', 'tags': ['toolkit', 'local'], 'author': copy.deepcopy(AUTHOR),
+              'scope': {'project': 'example-project', 'applicable': 'local tests', 'avoid': 'production'},
+              'status': 'observed', 'evidenceType': 'hypothesis', 'source': 'Plain-text reference; links are never fetched.',
+              'body': '# Body\nVerify the toolkit with unit tests and keep the review notes.'}
     result.update(changes)
     return result
 
@@ -71,23 +74,25 @@ class StoreTests(Fixture):
         self.assertEqual(self.store.read(post['id']), post)
         path = self.root / 'posts' / (post['id'] + '.md')
         self.assertEqual(path.read_text(encoding='utf-8'), post['body'])
-        changed = self.store.edit(post['id'], {'expectedRevision': 1, 'title': '更新标题', 'body': '新版正文'})
+        changed = self.store.edit(post['id'], {'expectedRevision': 1, 'title': 'Updated title', 'body': 'New body'})
         self.assertEqual(changed['revision'], 2)
-        self.assertEqual(changed['title'], '更新标题')
+        self.assertEqual(changed['title'], 'Updated title')
         self.assertEqual(changed['summary'], post['summary'])
         self.assertEqual(changed['createdAt'], post['createdAt'])
-        self.assertEqual(changed['body'], '新版正文')
+        self.assertEqual(changed['body'], 'New body')
         self.assertNotEqual(changed['updatedAt'], post['updatedAt'])
         exported = self.store.export()
         self.assertEqual(exported['schemaVersion'], 1)
         self.assertEqual(exported['posts'], [changed])
-        # 当前正文不在 posts 表；revisions 是只读快照而不是第二份当前正文。
+        # The current body is not in the posts table; revisions are read-only snapshots,
+        # not a second editable copy of the body.
         with contextlib.closing(sqlite3.connect(str(self.store.db_path))) as db:
             fields = [item[1] for item in db.execute('PRAGMA table_info(posts)')]
             self.assertNotIn('body', fields)
             self.assertNotIn('body', json.loads(db.execute('SELECT metadata FROM posts').fetchone()[0]))
 
-    def test_chinese_fulltext_search_and_no_fallback(self):
+    def test_cjk_search_and_no_fallback(self):
+        # CJK data is deliberate here: this exercises the offline adjacent-pair matcher.
         post = self.store.create(payload(title='一般标题', summary='摘要无关键词', body='使用中文双字检索查找正文中的特殊术语。'))
         results = self.store.search('特殊术语')
         self.assertEqual([item['id'] for item in results], [post['id']])
@@ -98,31 +103,55 @@ class StoreTests(Fixture):
         self.assertEqual(self.store.search('   '), [])
         self.assertEqual(self.store.search('!!!!'), [])
         self.assertEqual(self.store.search('特殊术语', category='coding'), [])
-        self.assertEqual(self.store.search('特殊术语', project='另一个项目'), [])
-        self.assertEqual(self.store.search('特殊术语', project='生产环境'), [])
-        self.assertEqual(len(self.store.search('特殊术语', project='示例项目')), 1)
+        self.assertEqual(self.store.search('特殊术语', project='another-project'), [])
+        self.assertEqual(self.store.search('特殊术语', project='production'), [])
+        self.assertEqual(len(self.store.search('特殊术语', project='example-project')), 1)
+
+    def test_search_keeps_partial_matches_ranked_below_full_matches(self):
+        empty = {'project': '', 'applicable': '', 'avoid': ''}
+        full = self.store.create(payload(title='Restore the desktop widget', summary='', source='',
+                                         body='Restore state after debugging.', tags=[], scope=empty))
+        partial = self.store.create(payload(title='Restore defaults', summary='', source='',
+                                            body='Nothing else.', tags=[], scope=empty))
+        self.store.create(payload(title='Unrelated', summary='', source='', body='No overlap.', tags=[], scope=empty))
+        results = self.store.search('restore desktop widget')
+        self.assertEqual([item['id'] for item in results], [full['id'], partial['id']])
+        self.assertEqual([item['relevance'] for item in results], [1.0, 0.33])
+        # The web list stays a strict filter: every term must match.
+        self.assertEqual([item['id'] for item in self.store.list_posts(query='restore desktop widget')], [full['id']])
+        self.assertEqual(self.store.search('zyxwvut qwerty'), [])
+
+    def test_search_tokenizer_and_partial_cjk_terms(self):
+        # CJK literals are deliberate: they cover mixed-script tokenizing and partial pair coverage.
+        self.assertEqual(commons.query_terms('README小改动 over-design'), ['readme', '小改动', 'over', 'design'])
+        # CJK data is deliberate: a long CJK term is matched by adjacent pairs.
+        post = self.store.create(payload(body='调试结束后在收尾前还原用户可见状态。'))
+        self.assertEqual([item['id'] for item in self.store.search('收尾还原')], [post['id']])
+        self.assertLess(self.store.search('收尾还原')[0]['relevance'], 1.0)
+        self.assertEqual(self.store.list_posts(query='收尾还原'), [])
+        self.assertEqual(self.store.search('火星探测'), [])
 
     def test_search_defaults_top_five_and_scope_evidence_before_heat(self):
         for status in ('draft', 'archived'):
             self.store.create(payload(status=status))
         for index in range(7):
-            self.store.create(payload(title='中文工具普通%d' % index, scope={'project': '', 'applicable': '', 'avoid': ''}))
-        hot = self.store.create(payload(title='中文工具热度高', scope={'project': '', 'applicable': '', 'avoid': ''}))
+            self.store.create(payload(title='Toolkit plain %d' % index, scope={'project': '', 'applicable': '', 'avoid': ''}))
+        hot = self.store.create(payload(title='Toolkit popular', scope={'project': '', 'applicable': '', 'avoid': ''}))
         for index in range(8):
-            who = dict(AUTHOR, label='点赞者%d' % index)
+            who = dict(AUTHOR, label='liker-%d' % index)
             self.store.like(hot['id'], {'actor': who, 'liked': True})
-        evidence = self.store.create(payload(title='中文工具实测证据', evidenceType='test_result', status='validated',
+        evidence = self.store.create(payload(title='Toolkit tested evidence', evidenceType='test_result', status='validated',
                                              scope={'project': '', 'applicable': '', 'avoid': ''}))
-        scoped = self.store.create(payload(title='中文工具明确范围'))
-        results = self.store.search('中文工具', project='示例项目')
+        scoped = self.store.create(payload(title='Toolkit explicit scope'))
+        results = self.store.search('toolkit', project='example-project')
         self.assertEqual(len(results), 5)
         self.assertEqual(results[0]['id'], scoped['id'])
         self.assertEqual(results[1]['id'], evidence['id'])
         self.assertTrue(all(item['status'] not in ('draft', 'archived') for item in results))
         self.assertEqual(self.store.read(hot['id'])['status'], 'observed')
-        self.assertEqual(len(self.store.search('中文工具', limit=2)), 2)
+        self.assertEqual(len(self.store.search('toolkit', limit=2)), 2)
         for invalid in (0, 6, True, '5'):
-            self.assert_error(400, self.store.search, '中文', invalid)
+            self.assert_error(400, self.store.search, 'toolkit', invalid)
 
     def test_like_is_idempotent_and_does_not_upgrade_status(self):
         post = self.store.create(payload())
@@ -135,7 +164,7 @@ class StoreTests(Fixture):
         self.assertEqual(self.store.like(post['id'], {'actor': dict(AUTHOR, kind='human'), 'liked': True})['likeCount'], 1)
         first_time = result['updatedAt']
         self.assertEqual(self.store.like(post['id'], {'actor': AUTHOR, 'liked': True})['updatedAt'], first_time)
-        second = dict(AUTHOR, framework='另一个框架')
+        second = dict(AUTHOR, framework='another-framework')
         self.assertEqual(self.store.like(post['id'], {'actor': second, 'liked': True})['likeCount'], 2)
         for _ in range(2):
             result = self.store.like(post['id'], {'actor': AUTHOR, 'liked': False})
@@ -144,7 +173,7 @@ class StoreTests(Fixture):
 
     def test_adoption_upsert_counts_and_outcome(self):
         post = self.store.create(payload())
-        value = {'actor': AUTHOR, 'taskId': '任务一', 'status': 'planned', 'reason': '准备复核', 'outcome': ''}
+        value = {'actor': AUTHOR, 'taskId': 'task-1', 'status': 'planned', 'reason': 'About to review', 'outcome': ''}
         planned = self.store.adopt(post['id'], value)
         self.assertEqual(planned['adoptionCount'], 0)
         self.assertEqual(len(planned['adoptions']), 1)
@@ -156,16 +185,16 @@ class StoreTests(Fixture):
         for status in ('helped', 'failed'):
             self.assert_error(400, self.store.adopt, post['id'], dict(value, status=status))
             self.assert_error(400, self.store.adopt, post['id'], dict(value, status=status, outcome='  '))
-        helped = self.store.adopt(post['id'], dict(value, status='helped', outcome='测试通过，消除了错误。'))
+        helped = self.store.adopt(post['id'], dict(value, status='helped', outcome='Tests passed; the error is gone.'))
         self.assertEqual(helped['adoptionCount'], 1)
         self.assertEqual(helped['helpedCount'], 1)
         self.assertEqual(helped['failedCount'], 0)
         self.assertEqual(len(helped['adoptions']), 1)
-        failed = self.store.adopt(post['id'], dict(value, status='failed', outcome='复现失败，记录原因。'))
+        failed = self.store.adopt(post['id'], dict(value, status='failed', outcome='Reproduction failed; cause recorded.'))
         self.assertEqual(failed['helpedCount'], 0)
         self.assertEqual(failed['failedCount'], 1)
         self.assertEqual(failed['status'], 'observed')
-        additional = self.store.adopt(post['id'], dict(value, taskId='任务二', status='helped', outcome='第二次实测通过。'))
+        additional = self.store.adopt(post['id'], dict(value, taskId='task-2', status='helped', outcome='Second run passed.'))
         self.assertEqual(additional['adoptionCount'], 2)
         back = self.store.adopt(post['id'], value)
         self.assertEqual(back['adoptionCount'], 1)
@@ -174,39 +203,39 @@ class StoreTests(Fixture):
 
     def test_comment_fields_and_limits(self):
         post = self.store.create(payload())
-        result = self.store.comment(post['id'], {'actor': HUMAN, 'text': '请补充复核依据。', 'section': '验证'})
+        result = self.store.comment(post['id'], {'actor': HUMAN, 'text': 'Please add review evidence.', 'section': 'Verification'})
         comment = result['comments'][0]
         self.assertEqual(comment['actor'], HUMAN)
-        self.assertEqual(comment['text'], '请补充复核依据。')
-        self.assertEqual(comment['section'], '验证')
+        self.assertEqual(comment['text'], 'Please add review evidence.')
+        self.assertEqual(comment['section'], 'Verification')
         self.assertTrue(comment['createdAt'])
         self.assertEqual(commons.valid_id(comment['id']), comment['id'])
-        result = self.store.comment(post['id'], {'actor': AUTHOR, 'text': '补充第二条评论'})
+        result = self.store.comment(post['id'], {'actor': AUTHOR, 'text': 'A second comment'})
         self.assertEqual(result['comments'][1]['section'], '')
         self.assertEqual(result['revision'], 1)
-        for value in ('', '  ', 123, '字' * 10001):
+        for value in ('', '  ', 123, 'x' * 10001):
             self.assert_error(400, self.store.comment, post['id'], {'actor': HUMAN, 'text': value})
 
     def test_stale_revision_conflict_and_immutable_history(self):
         original = self.store.create(payload())
-        changed = self.store.edit(original['id'], {'expectedRevision': 1, 'body': '正文第二版'})
-        error = self.assert_error(409, self.store.edit, original['id'], {'expectedRevision': 1, 'body': '不能覆盖'})
+        changed = self.store.edit(original['id'], {'expectedRevision': 1, 'body': 'Body v2'})
+        error = self.assert_error(409, self.store.edit, original['id'], {'expectedRevision': 1, 'body': 'must not overwrite'})
         self.assertEqual(error.details['currentRevision'], 2)
         self.assertEqual(self.store.read(original['id']), changed)
         snapshots = self.store.history(original['id'])
-        self.assertEqual([item['body'] for item in snapshots], [original['body'], '正文第二版'])
+        self.assertEqual([item['body'] for item in snapshots], [original['body'], 'Body v2'])
         with contextlib.closing(sqlite3.connect(str(self.store.db_path))) as db:
             with self.assertRaises(sqlite3.IntegrityError):
-                db.execute('UPDATE revisions SET body=? WHERE post_id=?', ('篡改', original['id']))
+                db.execute('UPDATE revisions SET body=? WHERE post_id=?', ('tampered', original['id']))
             with self.assertRaises(sqlite3.IntegrityError):
                 db.execute('DELETE FROM revisions WHERE post_id=?', (original['id'],))
 
     def test_manual_markdown_change_conflicts_without_losing_history(self):
         original = self.store.create(payload())
         path = self.store.posts_dir / (original['id'] + '.md')
-        manual_body = '# 手动修改\nMarkdown 才是当前正文。'
+        manual_body = '# Hand edit\nThe Markdown file is the current body.'
         path.write_text(manual_body, encoding='utf-8')
-        error = self.assert_error(409, self.store.edit, original['id'], {'expectedRevision': 1, 'body': '不应覆盖'})
+        error = self.assert_error(409, self.store.edit, original['id'], {'expectedRevision': 1, 'body': 'should not overwrite'})
         self.assertEqual(error.details['currentRevision'], 2)
         self.assertEqual(path.read_text(encoding='utf-8'), manual_body)
         reopened = commons.CommonsStore(self.root)
@@ -217,17 +246,17 @@ class StoreTests(Fixture):
         self.assertEqual(reopened.read(original['id'])['revision'], 2)
         snapshots = reopened.history(original['id'])
         self.assertEqual([item['body'] for item in snapshots], [original['body'], manual_body])
-        reopened.edit(original['id'], {'expectedRevision': 2, 'body': '复核后的第三版'})
+        reopened.edit(original['id'], {'expectedRevision': 2, 'body': 'Reviewed v3'})
         self.assertEqual([item['revision'] for item in reopened.history(original['id'])], [1, 2, 3])
 
     def test_get_export_and_search_sync_external_changes(self):
-        post = self.store.create(payload(body='最初内容'))
+        post = self.store.create(payload(body='Original content'))
         path = self.root / 'posts' / (post['id'] + '.md')
-        path.write_text('现在写入手动检索词', encoding='utf-8')
-        results = self.store.search('手动检索词')
+        path.write_text('Now contains handsearchword', encoding='utf-8')
+        results = self.store.search('handsearchword')
         self.assertEqual(results[0]['revision'], 2)
-        self.assertEqual(self.store.export()['posts'][0]['body'], '现在写入手动检索词')
-        path.write_text('第三次外部编辑', encoding='utf-8')
+        self.assertEqual(self.store.export()['posts'][0]['body'], 'Now contains handsearchword')
+        path.write_text('Third external edit', encoding='utf-8')
         self.assertEqual(self.store.export()['posts'][0]['revision'], 3)
 
     def test_id_validation_and_missing_posts(self):
@@ -243,9 +272,9 @@ class StoreTests(Fixture):
         marker = self.base / 'never-executed'
         injection = ('<script>alert(1)</script>\n${system("id")}\n'
                      "'); DROP TABLE posts; --\n"
-                     '__import__("pathlib").Path(%r).write_text("执行")' % str(marker))
+                     '__import__("pathlib").Path(%r).write_text("executed")' % str(marker))
         with mock.patch('socket.create_connection') as network:
-            post = self.store.create(payload(body=injection, source='https://example.invalid/不应请求'))
+            post = self.store.create(payload(body=injection, source='https://example.invalid/should-not-fetch'))
             result = self.store.comment(post['id'], {'actor': HUMAN, 'text': injection})
             network.assert_not_called()
         self.assertEqual(result['body'], injection)
@@ -255,17 +284,17 @@ class StoreTests(Fixture):
 
     def test_string_enum_and_structure_validation(self):
         invalid = [('title', 123), ('title', ''), ('summary', None), ('category', 'other'),
-                   ('tags', '标签'), ('tags', [1]), ('tags', ['x'] * 51), ('author', 'ai'),
+                   ('tags', 'tag'), ('tags', [1]), ('tags', ['x'] * 51), ('author', 'ai'),
                    ('author', dict(AUTHOR, kind='robot')), ('author', dict(AUTHOR, model=[])),
                    ('scope', []), ('scope', {'project': 123}), ('status', 'approved'),
                    ('evidenceType', 'likes'), ('source', {}), ('body', None),
-                   ('body', '字' * 100001), ('body', '\ud800')]
+                   ('body', 'x' * 100001), ('body', '\ud800')]
         for field, value in invalid:
             with self.subTest(field=field, value=str(value)[:20]):
                 self.assert_error(400, self.store.create, payload(**{field: value}))
         self.assertEqual(self.store.list_posts(), [])
-        self.assert_error(400, self.store.create, dict(payload(), unexpected='额外字段'))
-        post = self.store.create(payload(body='字' * 100000))
+        self.assert_error(400, self.store.create, dict(payload(), unexpected='extra field'))
+        post = self.store.create(payload(body='x' * 100000))
         self.assertEqual(len(post['body']), 100000)
         for revision in (None, True, 1.0, '1', 0):
             self.assert_error(400, self.store.edit, post['id'], {'expectedRevision': revision})
@@ -273,12 +302,17 @@ class StoreTests(Fixture):
         self.assert_error(400, self.store.list_posts, status='other')
 
     def test_validated_requires_evidence_not_heat(self):
-        for source in ('', '已验证', 'https://example.invalid/验证', '尚未验证，测试结果待确认'):
+        # Includes Chinese sources on purpose: the verification heuristic is bilingual.
+        for source in ('', 'verified', 'https://example.invalid/verify', 'Not verified yet; test result pending',
+                       '尚未验证，测试结果待确认'):
             self.assert_error(400, self.store.create, payload(status='validated', source=source))
         evidence = self.store.create(payload(status='validated', evidenceType='test_result'))
-        explained = self.store.create(payload(status='validated', source='在本机执行单元测试验证，结果全部通过。'))
+        explained = self.store.create(payload(status='validated', source='Ran the unit tests locally to verify; all passed.'))
+        # The heuristic is bilingual on purpose: records may be written in Chinese.
+        explained_cjk = self.store.create(payload(status='validated', source='在本机执行单元测试验证，结果全部通过。'))
         self.assertEqual(evidence['status'], 'validated')
         self.assertEqual(explained['status'], 'validated')
+        self.assertEqual(explained_cjk['status'], 'validated')
         self.assert_error(400, self.store.edit, evidence['id'], {'expectedRevision': 1, 'evidenceType': 'hypothesis'})
 
     def test_json_limits_duplicates_and_invalid_values(self):
@@ -292,10 +326,10 @@ class StoreTests(Fixture):
     def test_persistence_reopen_includes_all_interactions(self):
         post = self.store.create(payload())
         pid = post['id']
-        self.store.comment(pid, {'actor': HUMAN, 'text': '持久评论'})
+        self.store.comment(pid, {'actor': HUMAN, 'text': 'Persistent comment'})
         self.store.like(pid, {'actor': AUTHOR, 'liked': True})
-        self.store.adopt(pid, {'actor': AUTHOR, 'taskId': '持久任务', 'status': 'helped', 'outcome': '通过实测。'})
-        expected = self.store.edit(pid, {'expectedRevision': 1, 'summary': '持久摘要'})
+        self.store.adopt(pid, {'actor': AUTHOR, 'taskId': 'persistent-task', 'status': 'helped', 'outcome': 'Passed a real run.'})
+        expected = self.store.edit(pid, {'expectedRevision': 1, 'summary': 'Persistent summary'})
         actual = commons.CommonsStore(self.root).read(pid)
         self.assertEqual(actual, expected)
         self.assertEqual(len(actual['revisionHistory']), 2)
@@ -304,13 +338,13 @@ class StoreTests(Fixture):
     def test_body_file_symlink_and_directory_traversal_rejected(self):
         post = self.store.create(payload())
         secret = self.base / 'secret.txt'
-        secret.write_text('不应读取或覆盖', encoding='utf-8')
+        secret.write_text('must not be read or overwritten', encoding='utf-8')
         path = self.root / 'posts' / (post['id'] + '.md')
         path.unlink()
         path.symlink_to(secret)
         self.assert_error(500, self.store.read, post['id'])
-        self.assert_error(500, self.store.edit, post['id'], {'expectedRevision': 1, 'body': '覆盖'})
-        self.assertEqual(secret.read_text(encoding='utf-8'), '不应读取或覆盖')
+        self.assert_error(500, self.store.edit, post['id'], {'expectedRevision': 1, 'body': 'overwrite'})
+        self.assertEqual(secret.read_text(encoding='utf-8'), 'must not be read or overwritten')
         unsafe = self.base / 'unsafe'
         unsafe.mkdir()
         (unsafe / 'posts').symlink_to(self.store.posts_dir, target_is_directory=True)
@@ -326,11 +360,11 @@ class StoreTests(Fixture):
             real_write(target, data)
             if Path(target) == path and not failed[0]:
                 failed[0] = True
-                raise OSError('模拟正文替换后失败')
+                raise OSError('simulated failure after body replace')
 
         with mock.patch.object(commons, 'atomic_write', side_effect=fail_after_replace):
             with self.assertRaises(OSError):
-                self.store.edit(original['id'], {'expectedRevision': 1, 'body': '未提交正文'})
+                self.store.edit(original['id'], {'expectedRevision': 1, 'body': 'uncommitted body'})
         self.assertEqual(self.store.read(original['id']), original)
         self.assertEqual(len(self.store.history(original['id'])), 1)
         self.assertEqual(list(self.store.journal_dir.glob('*.json')), [])
@@ -343,7 +377,7 @@ class StoreTests(Fixture):
             real_write(target, data)
             if Path(target).suffix == '.md' and not failed[0]:
                 failed[0] = True
-                raise OSError('模拟新正文写入失败')
+                raise OSError('simulated failure writing a new body')
 
         with mock.patch.object(commons, 'atomic_write', side_effect=fail_after_replace):
             with self.assertRaises(OSError):
@@ -368,7 +402,7 @@ class StoreTests(Fixture):
             def commit(self):
                 if not failure[0]:
                     failure[0] = True
-                    raise sqlite3.OperationalError('模拟提交失败')
+                    raise sqlite3.OperationalError('simulated commit failure')
                 return self.db.commit()
 
         @contextlib.contextmanager
@@ -378,18 +412,19 @@ class StoreTests(Fixture):
 
         with mock.patch.object(self.store, '_connection', injected_connection):
             with self.assertRaises(sqlite3.OperationalError):
-                self.store.edit(original['id'], {'expectedRevision': 1, 'body': '提交失败的正文'})
+                self.store.edit(original['id'], {'expectedRevision': 1, 'body': 'body whose commit fails'})
         self.assertEqual(self.store.read(original['id']), original)
         self.assertEqual(len(self.store.history(original['id'])), 1)
 
     def test_crash_recovery_restores_uncommitted_write(self):
         original = self.store.create(payload())
-        # 模拟正文已替换、SQLite 尚未提交时进程退出：连接关闭撤销 SQL，保留恢复日志。
+        # Simulate a process exit after the body was replaced but before SQLite committed:
+        # closing the connection discards the SQL and leaves the recovery journal behind.
         with self.store._connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            self.store._write_body(original['id'], '崩溃遗留正文', original['body'], 2)
+            self.store._write_body(original['id'], 'body left by a crash', original['body'], 2)
             db.execute('UPDATE posts SET revision=2,body_hash=? WHERE id=?',
-                       (commons.body_hash('崩溃遗留正文'), original['id']))
+                       (commons.body_hash('body left by a crash'), original['id']))
         self.assertTrue(list(self.store.journal_dir.glob('*.json')))
         reopened = commons.CommonsStore(self.root)
         self.assertEqual(reopened.read(original['id']), original)
@@ -399,23 +434,23 @@ class StoreTests(Fixture):
         original = self.store.create(payload())
         with self.store._connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            self.store._write_body(original['id'], '未提交正文', original['body'], 2)
+            self.store._write_body(original['id'], 'uncommitted body', original['body'], 2)
         path = self.store.posts_dir / (original['id'] + '.md')
-        path.write_text('崩溃之后的人工修改', encoding='utf-8')
+        path.write_text('manual edit after the crash', encoding='utf-8')
         reopened = commons.CommonsStore(self.root)
         result = reopened.read(original['id'])
-        self.assertEqual(result['body'], '崩溃之后的人工修改')
+        self.assertEqual(result['body'], 'manual edit after the crash')
         self.assertEqual(result['revision'], 2)
         self.assertEqual(reopened.history(original['id'])[0]['body'], original['body'])
 
     def test_committed_write_survives_journal_cleanup_failure(self):
         original = self.store.create(payload())
-        with mock.patch.object(self.store, '_remove_journal', side_effect=OSError('模拟清理失败')):
-            updated = self.store.edit(original['id'], {'expectedRevision': 1, 'body': '已提交正文'})
+        with mock.patch.object(self.store, '_remove_journal', side_effect=OSError('simulated cleanup failure')):
+            updated = self.store.edit(original['id'], {'expectedRevision': 1, 'body': 'committed body'})
         self.assertEqual(updated['revision'], 2)
         self.assertTrue(list(self.store.journal_dir.glob('*.json')))
         reopened = commons.CommonsStore(self.root)
-        self.assertEqual(reopened.read(original['id'])['body'], '已提交正文')
+        self.assertEqual(reopened.read(original['id'])['body'], 'committed body')
         self.assertEqual(len(reopened.history(original['id'])), 2)
 
     def test_two_store_instances_cannot_overwrite_same_revision(self):
@@ -429,7 +464,7 @@ class StoreTests(Fixture):
                 return error.status
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            results = list(executor.map(lambda item: edit(*item), [(self.store, '并发甲'), (other, '并发乙')]))
+            results = list(executor.map(lambda item: edit(*item), [(self.store, 'concurrent A'), (other, 'concurrent B')]))
         self.assertEqual(sorted(results), [2, 409])
         self.assertEqual(len(self.store.history(original['id'])), 2)
 
@@ -439,7 +474,7 @@ class HTTPTests(Fixture):
         super().setUp()
         self.assets = self.base / 'assets'
         self.assets.mkdir()
-        (self.assets / 'index.html').write_text('<!doctype html><p>本机社区</p>', encoding='utf-8')
+        (self.assets / 'index.html').write_text('<!doctype html><p>Local community</p>', encoding='utf-8')
         self.server = commons.make_server(self.store, port=0, assets_dir=self.assets)
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': 0.02})
         self.thread.start()
@@ -484,7 +519,7 @@ class HTTPTests(Fixture):
         for path in ('/', '/index.html'):
             status, html, _ = self.request('GET', path)
             self.assertEqual(status, 200)
-            self.assertIn('本机社区'.encode('utf-8'), html)
+            self.assertIn(b'Local community', html)
         for path in ('/commons.sqlite3', '/posts/any.md', '/assets/index.html', '/../secret', '/%2e%2e/secret'):
             self.assertEqual(self.request('GET', path)[0], 404)
         with commons.make_server(self.store, 0, self.assets) as another:
@@ -498,22 +533,22 @@ class HTTPTests(Fixture):
         pid = post['id']
         path = '/api/posts/' + pid
         self.assertEqual(self.request('GET', path)[1], {'post': post})
-        status, result, _ = self.request('PATCH', path, {'expectedRevision': 1, 'body': '更新正文'}, token=True)
+        status, result, _ = self.request('PATCH', path, {'expectedRevision': 1, 'body': 'Updated body'}, token=True)
         self.assertEqual(status, 200)
         self.assertEqual(result['post']['revision'], 2)
-        status, result, _ = self.request('POST', path + '/comments', {'actor': HUMAN, 'text': 'HTTP 评论'}, token=True)
+        status, result, _ = self.request('POST', path + '/comments', {'actor': HUMAN, 'text': 'HTTP comment'}, token=True)
         self.assertEqual(status, 200)
-        self.assertEqual(result['post']['comments'][0]['text'], 'HTTP 评论')
+        self.assertEqual(result['post']['comments'][0]['text'], 'HTTP comment')
         for _ in range(2):
             status, result, _ = self.request('PUT', path + '/like', {'actor': AUTHOR, 'liked': True}, token=True)
             self.assertEqual(status, 200)
             self.assertEqual(result['post']['likeCount'], 1)
-        value = {'actor': AUTHOR, 'taskId': 'HTTP 任务', 'status': 'planned'}
+        value = {'actor': AUTHOR, 'taskId': 'http-task', 'status': 'planned'}
         status, result, _ = self.request('PUT', path + '/adoptions', value, token=True)
         self.assertEqual(status, 200)
         self.assertEqual(result['post']['adoptionCount'], 0)
         self.assertEqual(self.request('PUT', path + '/adoptions', dict(value, status='helped'), token=True)[0], 400)
-        status, result, _ = self.request('PUT', path + '/adoptions', dict(value, status='helped', outcome='本机测试通过。'), token=True)
+        status, result, _ = self.request('PUT', path + '/adoptions', dict(value, status='helped', outcome='Local test passed.'), token=True)
         self.assertEqual(status, 200)
         self.assertEqual(result['post']['helpedCount'], 1)
         required = commons.POST_FIELDS | {'id', 'createdAt', 'updatedAt', 'revision', 'likeCount',
@@ -523,16 +558,16 @@ class HTTPTests(Fixture):
         self.assertEqual(status, 200)
         self.assertEqual(exported, {'schemaVersion': 1, 'posts': [result['post']]})
         self.assertEqual(commons.CommonsStore(self.root).read(pid), result['post'])
-        # 约定中没有删除接口，不能把 HTTP DELETE 实现为隐式删除。
+        # The contract has no delete endpoint; HTTP DELETE must not become an implicit delete.
         self.assertEqual(self.request('DELETE', path, token=True)[0], 404)
 
     def test_list_query_category_author_and_status_filters(self):
-        one = self.store.create(payload(body='正文独有检索词'))
-        self.store.create(payload(category='coding', status='draft', author=HUMAN, body='另一条正文'))
+        one = self.store.create(payload(body='Body with uniqueword inside'))
+        self.store.create(payload(category='coding', status='draft', author=HUMAN, body='Another body'))
         status, result, _ = self.request('GET', '/api/posts')
         self.assertEqual(status, 200)
         self.assertEqual(len(result['posts']), 2)
-        status, result, _ = self.request('GET', '/api/posts?q=%E7%8B%AC%E6%9C%89&category=verification&author=%E6%B5%8B%E8%AF%95&status=observed')
+        status, result, _ = self.request('GET', '/api/posts?q=uniqueword&category=verification&author=test-model&status=observed')
         self.assertEqual(status, 200)
         self.assertEqual([item['id'] for item in result['posts']], [one['id']])
         self.assertEqual(self.request('GET', '/api/posts?q=notfound')[1], {'posts': []})
@@ -543,8 +578,8 @@ class HTTPTests(Fixture):
         pid = self.store.create(payload())['id']
         path = '/api/posts/' + pid
         mutations = [('POST', '/api/posts', payload()),
-                     ('PATCH', path, {'expectedRevision': 1, 'body': '禁止覆盖'}),
-                     ('POST', path + '/comments', {'actor': AUTHOR, 'text': '禁止评论'}),
+                     ('PATCH', path, {'expectedRevision': 1, 'body': 'forbidden overwrite'}),
+                     ('POST', path + '/comments', {'actor': AUTHOR, 'text': 'forbidden comment'}),
                      ('PUT', path + '/like', {'actor': AUTHOR, 'liked': True}),
                      ('PUT', path + '/adoptions', {'actor': AUTHOR, 'taskId': 'x', 'status': 'planned'})]
         for method, target, value in mutations:
@@ -600,22 +635,22 @@ class HTTPTests(Fixture):
         for headers, raw in cases:
             with self.subTest(headers=headers, raw=raw):
                 self.assertEqual(self.request('POST', '/api/posts', headers=headers, raw=raw)[0], 400)
-        self.assertEqual(self.request('POST', '/api/posts', payload(body='字' * 100001), token=True)[0], 400)
+        self.assertEqual(self.request('POST', '/api/posts', payload(body='x' * 100001), token=True)[0], 400)
 
     def test_http_revision_conflict_and_external_edit(self):
         original = self.store.create(payload())
         path = '/api/posts/' + original['id']
-        status, _, _ = self.request('PATCH', path, {'expectedRevision': 1, 'summary': '更新'}, token=True)
+        status, _, _ = self.request('PATCH', path, {'expectedRevision': 1, 'summary': 'Updated'}, token=True)
         self.assertEqual(status, 200)
-        status, error, _ = self.request('PATCH', path, {'expectedRevision': 1, 'body': '过期'}, token=True)
+        status, error, _ = self.request('PATCH', path, {'expectedRevision': 1, 'body': 'stale'}, token=True)
         self.assertEqual(status, 409)
         self.assertEqual(error['error']['currentRevision'], 2)
         md = self.store.posts_dir / (original['id'] + '.md')
-        md.write_text('用户手动编辑后的正文', encoding='utf-8')
-        status, error, _ = self.request('PATCH', path, {'expectedRevision': 2, 'body': '禁止覆盖'}, token=True)
+        md.write_text('Body after a manual edit', encoding='utf-8')
+        status, error, _ = self.request('PATCH', path, {'expectedRevision': 2, 'body': 'forbidden overwrite'}, token=True)
         self.assertEqual(status, 409)
         self.assertEqual(error['error']['currentRevision'], 3)
-        self.assertEqual(self.request('GET', path)[1]['post']['body'], '用户手动编辑后的正文')
+        self.assertEqual(self.request('GET', path)[1]['post']['body'], 'Body after a manual edit')
         self.assertEqual(len(self.store.history(original['id'])), 3)
 
     def test_http_malicious_id_missing_and_server_errors(self):
@@ -623,10 +658,10 @@ class HTTPTests(Fixture):
             self.assertEqual(self.request('GET', path)[0], 400)
         self.assertEqual(self.request('GET', '/api/posts/' + str(uuid.uuid4()))[0], 404)
         post = self.store.create(payload())
-        with mock.patch.object(self.store, 'read', side_effect=OSError('内部敏感信息')):
+        with mock.patch.object(self.store, 'read', side_effect=OSError('internal secret detail')):
             status, error, _ = self.request('GET', '/api/posts/' + post['id'])
         self.assertEqual(status, 500)
-        self.assertNotIn('内部敏感信息', json.dumps(error, ensure_ascii=False))
+        self.assertNotIn('internal secret detail', json.dumps(error, ensure_ascii=False))
         self.assertNotIn(self.token, json.dumps(error))
 
     def test_token_and_requests_are_not_logged(self):
@@ -641,7 +676,7 @@ class HTTPTests(Fixture):
 
 class CLITests(Fixture):
     def test_python39_syntax(self):
-        # 语法检查不生成 pyc；运行时 API 也仅使用 Python 3.9 已有的标准库能力。
+        # Parse-only check (no .pyc); runtime APIs are limited to the Python 3.9 stdlib.
         for path in (Path(commons.__file__), Path(__file__)):
             ast.parse(path.read_text(encoding='utf-8'), filename=str(path), feature_version=(3, 9))
 
@@ -667,26 +702,26 @@ class CLITests(Fixture):
         self.assertEqual(code, 0)
         pid = created['post']['id']
         self.assertEqual(self.cli('read', pid)[1], created)
-        code, result = self.cli('search', '--query', '中文', '--limit', '5', '--category', 'verification', '--project', '示例项目')
+        code, result = self.cli('search', '--query', 'toolkit', '--limit', '5', '--category', 'verification', '--project', 'example-project')
         self.assertEqual(code, 0)
         self.assertEqual(result['posts'][0]['id'], pid)
         self.assertNotIn('body', result['posts'][0])
-        self.assertEqual(self.cli('search', '--query', '绝不匹配', '--limit5')[1], {'posts': []})
-        code, edited = self.cli('edit', pid, '--file', self.input_file({'expectedRevision': 1, 'body': 'CLI 正文新版'}))
+        self.assertEqual(self.cli('search', '--query', 'zyxwvut')[1], {'posts': []})
+        code, edited = self.cli('edit', pid, '--file', self.input_file({'expectedRevision': 1, 'body': 'CLI body v2'}))
         self.assertEqual(code, 0)
         self.assertEqual(edited['post']['revision'], 2)
-        self.assertEqual(self.cli('comment', pid, '--file', self.input_file({'actor': HUMAN, 'text': 'CLI 评论'}))[0], 0)
+        self.assertEqual(self.cli('comment', pid, '--file', self.input_file({'actor': HUMAN, 'text': 'CLI comment'}))[0], 0)
         code, liked = self.cli('like', pid, '--file', self.input_file({'actor': AUTHOR, 'liked': True}))
         self.assertEqual(code, 0)
         self.assertEqual(liked['post']['likeCount'], 1)
-        code, adopted = self.cli('adopt', pid, '--file', self.input_file({'actor': AUTHOR, 'taskId': 'CLI 任务', 'status': 'helped', 'outcome': '通过。'}))
+        code, adopted = self.cli('adopt', pid, '--file', self.input_file({'actor': AUTHOR, 'taskId': 'cli-task', 'status': 'helped', 'outcome': 'Passed.'}))
         self.assertEqual(code, 0)
         self.assertEqual(adopted['post']['helpedCount'], 1)
         output = self.base / 'export.json'
         self.assertEqual(self.cli('export', '--output', str(output))[0], 0)
         exported = json.loads(output.read_text(encoding='utf-8'))
         self.assertEqual(exported, self.store.export())
-        self.assertEqual(exported['posts'][0]['body'], 'CLI 正文新版')
+        self.assertEqual(exported['posts'][0]['body'], 'CLI body v2')
 
     def test_root_priority_and_no_default_directory_access(self):
         environment_root = self.base / 'environment-root'
@@ -694,18 +729,18 @@ class CLITests(Fixture):
             self.assertEqual(commons.resolve_root(self.root), self.root.resolve())
             self.assertEqual(commons.resolve_root(), environment_root.resolve())
             self.assert_error(400, commons.resolve_root, '')
-            self.assert_error(400, commons.resolve_root, '含\x00空字节')
+            self.assert_error(400, commons.resolve_root, 'has\x00nul')
             code, _ = self.cli('init', env={'AGENT_COMMONS_HOME': str(environment_root)})
             self.assertEqual(code, 0)
             self.assertFalse(environment_root.exists())
             environment_store = commons.CommonsStore()
             self.assertEqual(environment_store.root, environment_root)
-        # 默认路径只计算，不创建、更不读取其中内容。
+        # The default path is only computed: never created, never read.
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(commons.resolve_root(), (Path.home() / '.agent-commons').resolve())
 
     def test_cli_errors_and_help_are_json(self):
-        for args in (('read', '../secret'), ('search', '--query', '中文', '--limit', '6'),
+        for args in (('read', '../secret'), ('search', '--query', 'toolkit', '--limit', '6'),
                      ('read',), ('unknown',), ('search', '--limit', 'not-int')):
             code, error = self.cli(*args)
             self.assertEqual(code, 2)
@@ -714,8 +749,8 @@ class CLITests(Fixture):
         self.assertEqual(code, 0)
         self.assertIn('help', help_value)
         original = self.store.create(payload())
-        self.store.edit(original['id'], {'expectedRevision': 1, 'title': '新标题'})
-        code, error = self.cli('edit', original['id'], '--file', self.input_file({'expectedRevision': 1, 'body': '过期'}))
+        self.store.edit(original['id'], {'expectedRevision': 1, 'title': 'New title'})
+        code, error = self.cli('edit', original['id'], '--file', self.input_file({'expectedRevision': 1, 'body': 'stale'}))
         self.assertEqual(code, 2)
         self.assertEqual(error['error']['status'], 409)
 
@@ -729,7 +764,7 @@ class CLITests(Fixture):
     def test_serve_startup_json_without_token_or_persistent_server(self):
         server = mock.MagicMock()
         server.server_port = 12345
-        server.csrf_token = '不得输出的测试令牌'
+        server.csrf_token = 'test-token-that-must-not-be-printed'
         server.__enter__.return_value = server
         server.serve_forever.side_effect = KeyboardInterrupt
         output = io.StringIO()

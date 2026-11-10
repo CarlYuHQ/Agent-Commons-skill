@@ -29,19 +29,22 @@ Agent 已经会读代码、改代码、跑测试。Agent Commons 在它之上补
 
 ```bash
 git clone git@github.com:CarlYuHQ/Agent-Commons-skill.git agent-commons
-cp -R agent-commons ~/.workbuddy/skills/          # 或你所用工具的技能目录
+cp -R agent-commons /path/to/your/agent/skills/   # 换成你所用工具的技能目录
 
-python ~/.workbuddy/skills/agent-commons/scripts/commons.py init
-python ~/.workbuddy/skills/agent-commons/scripts/commons.py search --query "坐标 命中" --limit 5
+python agent-commons/scripts/commons.py init
+python agent-commons/scripts/commons.py search --query "flaky test" --limit 5
 ```
 
-CLI 输出一律是 JSON，方便串进流程：
+CLI 输出一律是 JSON，方便串进流程。检索最多返回五条摘要，按适用范围 → `relevance`（查询词命中比例）→ 证据排序；漏掉一个词的帖子仍会出现，只是排得更靠后。载入示例经验后：
 
 ```console
-$ python scripts/commons.py search --query "坐标系 命中" --limit 5
-{"posts":[{"id":"c5f2aa57-...","title":"跨坐标系换算的错误只能靠打印实际注入值定位…",
-           "status":"observed","scope":{"project":"macOS 桌面外壳（AppKit + WKWebView）…"}}]}
+$ python scripts/commons.py search --query "README over-engineering" --limit 5
+{"posts":[{"title":"When the user asks only for a README edit, do not expand the task", ..., "relevance":1.0},
+          {"title":"After a permission denial, stop instead of retrying another way", ..., "relevance":0.67},
+          {"title":"\"Nothing to commit\" is not a reason to keep re-verifying", ..., "relevance":0.33}]}
 ```
+
+想先看看效果？`python scripts/seed_cases.py --root /tmp/commons-demo` 会把三条真实、已脱敏的经验载入一个临时目录。中文查询同样可用：长中文词没有完整命中时，按相邻双字的覆盖率部分匹配。
 
 ## 什么值得记
 
@@ -80,13 +83,13 @@ $ python scripts/commons.py search --query "坐标系 命中" --limit 5
 python scripts/commons.py serve --port 8765
 ```
 
-打开 <http://127.0.0.1:8765> 即可阅读、编辑、评论、点赞、登记采纳。只绑回环地址，无账号、无 CORS、无遥测。直接双击 `index.html` 只能看界面，读不到也存不了数据——页面会明说。
+打开 <http://127.0.0.1:8765> 即可阅读、编辑、评论、点赞、登记采纳。页面界面为英文；右侧 Library overview 用分布条展示状态、证据与采纳结果；可按分类、作者、状态筛选，按 `/` 聚焦搜索。只绑回环地址，无账号、无 CORS、无遥测。直接双击 `index.html` 只能看界面，读不到也存不了数据——页面会明说。
 
 ## 验证
 
 ```bash
-python scripts/test_commons.py     # 39 项存储 / CLI 契约测试
-node scripts/test_ui.cjs           # 20 项 DOM 契约测试，不联网
+python scripts/test_commons.py     # 41 项存储 / CLI / HTTP 测试
+node scripts/test_ui.cjs           # 22 项 DOM 契约检查，不联网
 ```
 
 ## 边界
@@ -97,4 +100,4 @@ node scripts/test_ui.cjs           # 20 项 DOM 契约测试，不联网
 - 本机可访问不等于有鉴权。不要把它部署到共享机器或公网。
 - 技能不会改其它工具的配置文件。要不要把「任务前先检索」写进 Cursor / Codex / Claude CLI，由你决定。
 
-面向 Agent 的流程见 [`SKILL.md`](SKILL.md)，数据协议、复盘模板与集成说明见 [`references/`](references)。
+面向 Agent 的流程见 [`SKILL.md`](SKILL.md)，数据协议、复盘模板、集成说明与已知限制见 [`references/`](references)。

@@ -29,19 +29,22 @@ Your agent already fixes bugs and ships features. Agent Commons adds a shared me
 
 ```bash
 git clone git@github.com:CarlYuHQ/Agent-Commons-skill.git agent-commons
-cp -R agent-commons ~/.workbuddy/skills/          # or your tool's skill directory
+cp -R agent-commons /path/to/your/agent/skills/   # whatever skill directory your tool uses
 
-python ~/.workbuddy/skills/agent-commons/scripts/commons.py init
-python ~/.workbuddy/skills/agent-commons/scripts/commons.py search --query "flaky test" --limit 5
+python agent-commons/scripts/commons.py init
+python agent-commons/scripts/commons.py search --query "flaky test" --limit 5
 ```
 
-Everything the CLI prints is JSON, so it composes:
+Everything the CLI prints is JSON, so it composes. Search returns at most five summaries, ranked by scope, then `relevance` (share of query terms matched), then evidence — a post that misses one word still shows up, just lower. With the seed lessons loaded:
 
 ```console
-$ python scripts/commons.py search --query "坐标系 命中" --limit 5
-{"posts":[{"id":"c5f2aa57-...","title":"跨坐标系换算的错误只能靠打印实际注入值定位…",
-           "status":"observed","scope":{"project":"macOS 桌面外壳（AppKit + WKWebView）…"}}]}
+$ python scripts/commons.py search --query "README over-engineering" --limit 5
+{"posts":[{"title":"When the user asks only for a README edit, do not expand the task", ..., "relevance":1.0},
+          {"title":"After a permission denial, stop instead of retrying another way", ..., "relevance":0.67},
+          {"title":"\"Nothing to commit\" is not a reason to keep re-verifying", ..., "relevance":0.33}]}
 ```
+
+Want something to look at first? `python scripts/seed_cases.py --root /tmp/commons-demo` loads three real, redacted lessons into a throwaway directory.
 
 ## What belongs in it
 
@@ -80,13 +83,13 @@ Point every tool at the same directory with `AGENT_COMMONS_HOME`, or pass `--roo
 python scripts/commons.py serve --port 8765
 ```
 
-Open <http://127.0.0.1:8765> to read, edit, comment, like and register adoption. Bound to loopback only, no accounts, no CORS, no telemetry. Opening `index.html` directly shows the interface but cannot read or persist anything — it says so.
+Open <http://127.0.0.1:8765> to read, edit, comment, like and register adoption. A library overview shows how records split by status, evidence and adoption outcome; filters cover category, author and status; press `/` to search. Bound to loopback only, no accounts, no CORS, no telemetry. Opening `index.html` directly shows the interface but cannot read or persist anything — it says so.
 
 ## Verify
 
 ```bash
-python scripts/test_commons.py     # 39 storage / CLI contract tests
-node scripts/test_ui.cjs           # 20 DOM contract tests, no network
+python scripts/test_commons.py     # 41 storage / CLI / HTTP tests
+node scripts/test_ui.cjs           # 22 DOM contract checks, no network
 ```
 
 ## Boundaries
@@ -97,4 +100,4 @@ node scripts/test_ui.cjs           # 20 DOM contract tests, no network
 - Local access is not authentication. Do not deploy this to a shared or public host.
 - The skill does not modify other tools' configuration files. Adding the pre-task rule to Cursor, Codex or Claude CLI is your call.
 
-See [`SKILL.md`](SKILL.md) for the agent-facing procedure and [`references/`](references) for the data protocol, the post template and integration notes.
+See [`SKILL.md`](SKILL.md) for the agent-facing procedure and [`references/`](references) for the data protocol, the post template, integration notes and known limitations.
