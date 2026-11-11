@@ -754,6 +754,54 @@ class CLITests(Fixture):
         self.assertEqual(code, 2)
         self.assertEqual(error['error']['status'], 409)
 
+    def test_read_only_commands_never_create_a_store(self):
+        missing = self.base / 'typo-root'
+
+        def run(*args):
+            result = subprocess.run([sys.executable, str(Path(commons.__file__)), '--root', str(missing), *args],
+                                    capture_output=True, text=True, encoding='utf-8', timeout=15,
+                                    env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+            self.assertEqual(result.stderr, '')
+            return result.returncode, json.loads(result.stdout)
+
+        code, found = run('search', '--query', 'toolkit')
+        self.assertEqual((code, found['posts']), (0, []))
+        self.assertIn('No store at', found['note'])
+        for args in (('read', '11111111-1111-4111-8111-111111111111'), ('export', '--output', str(self.base / 'x.json'))):
+            code, error = run(*args)
+            self.assertEqual((code, error['error']['code']), (2, 'store_missing'))
+        self.assertFalse(missing.exists(), 'a mistyped --root must not become an empty store')
+        self.assertFalse((self.base / 'x.json').exists())
+        self.assertEqual(run('init')[0], 0)
+        self.assertTrue((missing / 'commons.sqlite3').is_file())
+
+    def test_cli_explains_empty_results_and_input_mistakes(self):
+        code, result = self.cli('search', '--query', '!!!')
+        self.assertEqual((code, result['posts']), (0, []))
+        self.assertIn('no searchable terms', result['note'])
+        self.assertNotIn('note', self.cli('search', '--query', 'zyxwvut')[1], 'a real miss needs no note')
+        code, error = self.cli('post', '--file', str(self.base / 'missing.json'))
+        self.assertEqual((code, error['error']['status'], error['error']['code']), (2, 400, 'input_unreadable'))
+        self.assertIn('--file', error['error']['message'])
+        self.assertNotIn('storage', error['error']['message'])
+        code, error = self.cli('search')
+        self.assertIn('--query', error['error']['message'], 'the message names the missing argument')
+        completed = subprocess.run([sys.executable, str(Path(commons.__file__)), 'search', '--query', 'x', '--root', str(self.root)],
+                                   capture_output=True, text=True, encoding='utf-8', timeout=15,
+                                   env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
+        self.assertIn('--root belongs before the subcommand', json.loads(completed.stdout)['error']['message'])
+
+    def test_every_subcommand_and_argument_is_documented_in_help(self):
+        parser = commons.build_parser()
+        subparsers = next(a for a in parser._actions if a.dest == 'command')
+        helps = {choice.dest: choice.help for choice in subparsers._choices_actions}
+        self.assertEqual(set(helps), set(subparsers.choices))
+        self.assertEqual(len(set(helps.values())), len(helps), 'no two subcommands share one description')
+        for name, sub in subparsers.choices.items():
+            for action in sub._actions:
+                self.assertTrue(action.help, 'argument %s of %s has no help' % (action.dest, name))
+        self.assertTrue(next(a for a in parser._actions if a.dest == 'root').help)
+
     def test_export_cannot_overwrite_storage(self):
         post = self.store.create(payload())
         for target in (self.store.db_path, self.store.posts_dir / (post['id'] + '.md'),

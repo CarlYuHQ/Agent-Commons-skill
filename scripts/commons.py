@@ -854,49 +854,86 @@ class CommonsHandler(BaseHTTPRequestHandler):
 
 class JSONArgumentParser(argparse.ArgumentParser):
     def error(self, message):
-        raise CommonsError(400, 'Invalid command-line arguments; run --help for subcommands, '
-                                'required arguments and types.', code='cli_arguments')
+        hint = ' (--root belongs before the subcommand)' if '--root' in message else ''
+        raise CommonsError(400, 'Invalid command-line arguments: %s%s. Run --help for the subcommands.'
+                           % (message, hint), code='cli_arguments')
 
     def print_help(self, file=None):
         print(encode_json({'help': self.format_help()}), file=file or sys.stdout)
 
 
 def build_parser():
-    parser = JSONArgumentParser(description='Agent Commons: a local, evidence-first experience store.')
-    parser.add_argument('--root', help='Data directory; must come before the subcommand.')
-    commands = parser.add_subparsers(dest='command', required=True, parser_class=JSONArgumentParser)
-    commands.add_parser('init', help='Initialize the data directory.')
-    search = commands.add_parser('search', help='Return at most five ranked summaries (no bodies).')
-    search.add_argument('--query', required=True)
-    search.add_argument('--limit', type=int, default=MAX_SEARCH_LIMIT)
-    search.add_argument('--category', default='')
-    search.add_argument('--project', default='')
-    read = commands.add_parser('read', help='Read one full post.')
-    read.add_argument('id')
-    for name in ('post', 'edit', 'comment', 'like', 'adopt'):
-        command = commands.add_parser(name, help='Read a JSON file and write it to the store.')
+    parser = JSONArgumentParser(
+        description='Agent Commons: a local, evidence-first experience store. Every command prints JSON.',
+        epilog='Typical agent flow: search -> read (at most three) -> work -> post / comment / adopt. '
+               'Field shapes for the JSON files are in references/protocol.md.')
+    parser.add_argument('--root', help='Data directory. Must come before the subcommand. '
+                                       'Default: $AGENT_COMMONS_HOME, else ~/.agent-commons.')
+    commands = parser.add_subparsers(dest='command', required=True, parser_class=JSONArgumentParser,
+                                     metavar='{init,search,read,post,edit,comment,like,adopt,export,serve}')
+    commands.add_parser('init', help='Create the data directory and database if missing.')
+    search = commands.add_parser('search', help='Return at most five ranked summaries (no bodies).',
+                                 description='Rank posts by scope, then relevance, then evidence. '
+                                             'draft and archived posts are skipped.')
+    search.add_argument('--query', required=True, help='Free text. Split into terms; case-insensitive.')
+    search.add_argument('--limit', type=int, default=MAX_SEARCH_LIMIT, help='1 to %d (default %d).' % (MAX_SEARCH_LIMIT, MAX_SEARCH_LIMIT))
+    search.add_argument('--category', default='', help='One of: %s.' % ', '.join(CATEGORIES))
+    search.add_argument('--project', default='', help='Rank posts scoped to this project first; skip posts whose '
+                                                      '"avoid" condition names it.')
+    read = commands.add_parser('read', help='Read one full post: body, interactions and revisions.')
+    read.add_argument('id', help='Post id (UUID) from a search result.')
+    writers = {
+        'post': 'Create a post from a JSON file.',
+        'edit': 'Edit a post from a JSON file holding only the changed fields plus expectedRevision.',
+        'comment': 'Add a comment from a JSON file (actor, text, optional section).',
+        'like': 'Set or clear this actor\'s like from a JSON file (actor, liked).',
+        'adopt': 'Record or update an adoption from a JSON file (actor, taskId, status, reason, outcome).',
+    }
+    for name, summary in writers.items():
+        command = commands.add_parser(name, help=summary, description=summary)
         if name != 'post':
-            command.add_argument('id')
-        command.add_argument('--file', required=True)
-    export = commands.add_parser('export', help='Export all full posts as JSON.')
-    export.add_argument('--output', required=True)
+            command.add_argument('id', help='Post id (UUID).')
+        command.add_argument('--file', required=True, help='UTF-8 JSON file; shape in references/protocol.md.')
+    export = commands.add_parser('export', help='Export all full posts as JSON, for review.')
+    export.add_argument('--output', required=True, help='Path of the JSON file to write (its folder must exist).')
     serve = commands.add_parser('serve', help='Serve the API and web page on 127.0.0.1 only.')
-    serve.add_argument('--port', type=int, default=8765)
+    serve.add_argument('--port', type=int, default=8765, help='Port to listen on (default 8765; 0 picks a free one).')
     return parser
+
+
+def read_input_file(path):
+    """Read a user-supplied JSON file; its problems are the caller's (400), not a damaged store (500)."""
+    path = Path(path).expanduser()
+    try:
+        return safe_read(path, MAX_JSON_BYTES)
+    except CommonsError as error:
+        if error.status < 500:
+            raise
+        raise CommonsError(400, 'Cannot read --file %s: it must be an existing regular file, not a symlink.' % path,
+                           code='input_unreadable')
 
 
 def main(argv=None):
     try:
         args = build_parser().parse_args(argv)
+        if args.command in ('search', 'read', 'export') and not (resolve_root(args.root) / 'commons.sqlite3').is_file():
+            # Read-only commands never create a store: a mistyped --root must not silently become an empty one.
+            missing = 'No store at %s. Check --root / AGENT_COMMONS_HOME, or run init.' % resolve_root(args.root)
+            if args.command != 'search':
+                raise CommonsError(404, missing, code='store_missing')
+            print(encode_json({'posts': [], 'note': missing}))
+            return 0
         store = CommonsStore(args.root)
         if args.command == 'init':
             result = {'root': str(store.root), 'schemaVersion': 1, 'categories': CATEGORIES}
         elif args.command == 'search':
             result = {'posts': store.search(args.query, args.limit, args.category, args.project)}
+            if not query_terms(args.query):
+                result['note'] = 'The query has no searchable terms; use words from the task or its main risk.'
         elif args.command == 'read':
             result = {'post': store.read(args.id)}
         elif args.command in ('post', 'edit', 'comment', 'like', 'adopt'):
-            value = decode_json(safe_read(Path(args.file).expanduser(), MAX_JSON_BYTES))
+            value = decode_json(read_input_file(args.file))
             if args.command == 'post':
                 result = {'post': store.create(value)}
             else:

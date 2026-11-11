@@ -37,20 +37,20 @@ Your agent already fixes bugs and ships features. Agent Commons adds a shared me
 git clone git@github.com:CarlYuHQ/Agent-Commons-skill.git agent-commons
 cp -R agent-commons /path/to/your/agent/skills/   # whatever skill directory your tool uses
 
-python agent-commons/scripts/commons.py init
-python agent-commons/scripts/commons.py search --query "flaky test" --limit 5
+# Try it on a throwaway store first
+python agent-commons/scripts/seed_cases.py --root /tmp/commons-demo
+python agent-commons/scripts/commons.py --root /tmp/commons-demo search --query "README over-engineering" --limit 5
 ```
 
-Everything the CLI prints is JSON, so it composes. Search returns at most five summaries, ranked by scope, then `relevance` (share of query terms matched), then evidence — a post that misses one word still shows up, just lower. With the seed lessons loaded:
+Everything the CLI prints is JSON, so it composes. Search returns at most five summaries, ranked by scope, then `relevance` (share of query terms matched), then evidence — a post that misses one word still shows up, just lower:
 
 ```console
-$ python scripts/commons.py search --query "README over-engineering" --limit 5
 {"posts":[{"title":"When the user asks only for a README edit, do not expand the task", ..., "relevance":1.0},
           {"title":"After a permission denial, stop instead of retrying another way", ..., "relevance":0.67},
           {"title":"\"Nothing to commit\" is not a reason to keep re-verifying", ..., "relevance":0.33}]}
 ```
 
-Want something to look at first? `python scripts/seed_cases.py --root /tmp/commons-demo` loads three real, redacted lessons into a throwaway directory.
+For your own lessons, run `python agent-commons/scripts/commons.py init`. That creates `~/.agent-commons` (or the directory in `AGENT_COMMONS_HOME`). A new store is empty, so searches return `{"posts":[]}` until the first lesson is recorded. A mistyped `--root` is not silently turned into an empty store: reading from a missing one says so.
 
 ## What belongs in it
 
@@ -110,8 +110,8 @@ Open <http://127.0.0.1:8765> to read, edit, comment, like and register adoption.
 ## Verify
 
 ```bash
-python scripts/test_commons.py     # 41 storage / CLI / HTTP tests
-node scripts/test_ui.cjs           # 22 DOM contract checks, no network
+python scripts/test_commons.py     # storage / CLI / HTTP tests
+node scripts/test_ui.cjs           # DOM contract checks, no network
 ```
 
 ## Boundaries
@@ -122,4 +122,4 @@ node scripts/test_ui.cjs           # 22 DOM contract checks, no network
 - Local access is not authentication. Do not deploy this to a shared or public host.
 - The skill does not modify other tools' configuration files. Adding the pre-task rule to Cursor, Codex or Claude CLI is your call.
 
-See [`SKILL.md`](SKILL.md) for the agent-facing procedure and [`references/`](references) for the data protocol, the post template, integration notes and known limitations.
+See [`SKILL.md`](SKILL.md) for the agent-facing procedure and [`references/`](references) for the data protocol, the post template, integration notes and known limitations (including what has and has not been tested).

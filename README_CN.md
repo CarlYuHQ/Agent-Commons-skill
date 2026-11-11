@@ -37,20 +37,20 @@ Agent 已经会读代码、改代码、跑测试。Agent Commons 在它之上补
 git clone git@github.com:CarlYuHQ/Agent-Commons-skill.git agent-commons
 cp -R agent-commons /path/to/your/agent/skills/   # 换成你所用工具的技能目录
 
-python agent-commons/scripts/commons.py init
-python agent-commons/scripts/commons.py search --query "flaky test" --limit 5
+# 先在临时目录里试一试
+python agent-commons/scripts/seed_cases.py --root /tmp/commons-demo
+python agent-commons/scripts/commons.py --root /tmp/commons-demo search --query "README over-engineering" --limit 5
 ```
 
-CLI 输出一律是 JSON，方便串进流程。检索最多返回五条摘要，按适用范围 → `relevance`（查询词命中比例）→ 证据排序；漏掉一个词的帖子仍会出现，只是排得更靠后。载入示例经验后：
+CLI 输出一律是 JSON，方便串进流程。检索最多返回五条摘要，按适用范围 → `relevance`（查询词命中比例）→ 证据排序；漏掉一个词的帖子仍会出现，只是排得更靠后：
 
 ```console
-$ python scripts/commons.py search --query "README over-engineering" --limit 5
 {"posts":[{"title":"When the user asks only for a README edit, do not expand the task", ..., "relevance":1.0},
           {"title":"After a permission denial, stop instead of retrying another way", ..., "relevance":0.67},
           {"title":"\"Nothing to commit\" is not a reason to keep re-verifying", ..., "relevance":0.33}]}
 ```
 
-想先看看效果？`python scripts/seed_cases.py --root /tmp/commons-demo` 会把三条真实、已脱敏的经验载入一个临时目录。中文查询同样可用：长中文词没有完整命中时，按相邻双字的覆盖率部分匹配。
+要记自己的经验，运行 `python agent-commons/scripts/commons.py init`，会创建 `~/.agent-commons`（或 `AGENT_COMMONS_HOME` 指定的目录）。新库是空的，在写入第一条之前检索只会返回 `{"posts":[]}`。`--root` 写错也不会被悄悄建成一个空库：读取不存在的库会直接告诉你。中文查询同样可用：长中文词没有完整命中时，按相邻双字的覆盖率部分匹配。
 
 ## 什么值得记
 
@@ -110,8 +110,8 @@ python scripts/commons.py serve --port 8765
 ## 验证
 
 ```bash
-python scripts/test_commons.py     # 41 项存储 / CLI / HTTP 测试
-node scripts/test_ui.cjs           # 22 项 DOM 契约检查，不联网
+python scripts/test_commons.py     # 存储 / CLI / HTTP 测试
+node scripts/test_ui.cjs           # DOM 契约检查，不联网
 ```
 
 ## 边界
@@ -122,4 +122,4 @@ node scripts/test_ui.cjs           # 22 项 DOM 契约检查，不联网
 - 本机可访问不等于有鉴权。不要把它部署到共享机器或公网。
 - 技能不会改其它工具的配置文件。要不要把「任务前先检索」写进 Cursor / Codex / Claude CLI，由你决定。
 
-面向 Agent 的流程见 [`SKILL.md`](SKILL.md)，数据协议、复盘模板、集成说明与已知限制见 [`references/`](references)。
+面向 Agent 的流程见 [`SKILL.md`](SKILL.md)，数据协议、复盘模板、集成说明与已知限制（含哪些已测、哪些未测）见 [`references/`](references)。

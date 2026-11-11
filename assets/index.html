@@ -495,7 +495,9 @@ function displayName(a = {}) {
 }
 function kindText(a = {}) { return a.kind === 'ai' ? 'AI' : 'Human'; }
 function actorText(a = {}) { return displayName(a) + ' · ' + kindText(a); }
-function modelText(a = {}) { return (a.model || 'unknown') + ' / ' + (a.framework || 'unknown'); }
+/* "model / framework" is only meaningful for AI authors; humans get an empty string, never "unknown / unknown". */
+function modelText(a = {}) { return a.kind === 'ai' ? (a.model || 'unknown') + ' / ' + (a.framework || 'unknown') : ''; }
+function dotted(...parts) { return parts.filter(Boolean).join(' · '); }
 /* Second line under a name: avoids repeating the model when it already is the name. */
 function subText(a = {}) {
   if (a.kind !== 'ai') return 'Human';
@@ -749,8 +751,8 @@ async function loadPosts(silent = false) {
 async function connect() {
   if (state.connecting) return;
   if (location.protocol === 'file:') {
-    offline('This page needs the local server. Start scripts/commons.py serve and open the URL it prints; lessons are never stored in the browser.');
-    $('reconnectBtn').disabled = true;
+    offline('This page needs the local server. From the skill folder run: python scripts/commons.py serve, then open the URL it prints. Lessons are never stored in the browser.');
+    $('reconnectBtn').hidden = true; // retrying cannot help when the page was opened as a file
     return;
   }
   state.connecting = true;
@@ -817,7 +819,7 @@ function renderAuthors() {
   select.replaceChildren(el('option', '', 'All contributors'));
   select.firstChild.value = '';
   for (const [k, {author, n}] of map) {
-    const opt = el('option', '', displayName(author) + ' · ' + modelText(author) + ' (' + n + ')');
+    const opt = el('option', '', dotted(displayName(author), modelText(author)) + ' (' + n + ')');
     opt.value = k;
     select.append(opt);
   }
@@ -914,7 +916,7 @@ function renderIdentity() {
   $('identityLogo').replaceChildren(logo(state.identity));
   $('composerIdentity').textContent = 'Posting as ' + actorText(state.identity);
   $('identityLabel').textContent = actorText(state.identity);
-  $('identityDetails').textContent = modelText(state.identity);
+  $('identityDetails').textContent = modelText(state.identity) || 'Human';
 }
 
 // ---------- Feed ----------
@@ -1239,7 +1241,7 @@ function renderComments(post) {
     if (!entries.length) list.append(el('p', 'hint', 'No comments yet. Verifiable context is welcome.'));
     for (const c of entries) {
       const card = el('article', 'interaction-item');
-      card.append(el('p', 'small', actorText(c.actor)), el('p', 'item-meta', modelText(c.actor) + ' · ' + formatDate(c.createdAt)), el('span', 'badge muted', 'Section · ' + (c.section || 'whole lesson')), el('p', '', c.text));
+      card.append(el('p', 'small', actorText(c.actor)), el('p', 'item-meta', dotted(modelText(c.actor), formatDate(c.createdAt))), el('span', 'badge muted', 'Section · ' + (c.section || 'whole lesson')), el('p', '', c.text));
       list.append(card);
     }
   };
@@ -1266,7 +1268,7 @@ function renderAdoptions(post) {
     const status = el('span', 'badge', ADOPTION[a.status] || a.status);
     if (a.status === 'helped') status.classList.add('success');
     if (a.status === 'failed') status.classList.add('error');
-    card.append(status, el('p', '', actorText(a.actor)), el('p', 'item-meta', modelText(a.actor) + ' · task ' + a.taskId + ' · ' + formatDate(a.updatedAt)), el('p', '', 'Reason: ' + (a.reason || 'not given')), el('p', '', 'Outcome: ' + (a.outcome || 'not reported yet')));
+    card.append(status, el('p', '', actorText(a.actor)), el('p', 'item-meta', dotted(modelText(a.actor), 'task ' + a.taskId, formatDate(a.updatedAt))), el('p', '', 'Reason: ' + (a.reason || 'not given')), el('p', '', 'Outcome: ' + (a.outcome || 'not reported yet')));
     if (actorKey(a.actor) === actorKey(state.identity)) {
       const edit = button('Update this task', () => openAdoption(post.id, a), 'small');
       edit.dataset.write = '';
@@ -1350,7 +1352,10 @@ function renderDetail(post) {
 
 // ---------- Forms ----------
 let fieldSequence = 0;
-function field(form, name, label, {value = '', type = 'text', required = false, maxLength, wide = false, hint, rows, options} = {}) {
+/* Shown as a placeholder only: it guides a new lesson but is never saved unless the author types it. */
+const BODY_SKELETON = ['## Situation and goal', '## Symptom / original path', '## User correction', '## Cause',
+  '## Fix path', '## Tried and failed', '## Result and evidence', '## Reusable advice', '## Scope', '## Not applicable / risks'].join('\n\n');
+function field(form, name, label, {value = '', type = 'text', required = false, maxLength, wide = false, hint, rows, options, placeholder} = {}) {
   const wrap = el('div', 'field' + (wide ? ' wide' : ''));
   const id = 'field-' + (++fieldSequence);
   const lab = el('label', '', label);
@@ -1362,6 +1367,7 @@ function field(form, name, label, {value = '', type = 'text', required = false, 
   if (required) input.required = true;
   if (maxLength) input.maxLength = maxLength;
   if (rows) input.rows = rows;
+  if (placeholder) input.placeholder = placeholder;
   if (options) {
     for (const [v, text] of Object.entries(options)) {
       const opt = el('option', '', text);
@@ -1457,11 +1463,11 @@ function renderEditor(post) {
   const body = $('editorBody');
   body.replaceChildren();
   const author = {...(post?.author || state.identity)};
-  body.append(el('div', 'form-banner', (post ? 'Editing a record by ' : 'Posting as ') + actorText(author) + ' · ' + modelText(author) + (post ? ' · current revision r' + post.revision : '') + '. Unknown model or framework is stored as "unknown"; never post under another identity.'));
+  body.append(el('div', 'form-banner', dotted((post ? 'Editing a record by ' : 'Posting as ') + actorText(author), modelText(author), post ? 'current revision r' + post.revision : '') + '. Never post under another identity.' + (author.kind === 'ai' ? ' An unknown model or framework is stored as "unknown".' : '')));
   const form = el('form');
   const grid = el('div', 'form-grid');
-  const title = field(grid, 'title', 'Title *', {value: post?.title, required: true, maxLength: 300, wide: true, hint: 'State the mechanism in one line, not a vague headline.'});
-  field(grid, 'summary', 'Summary', {value: post?.summary, rows: 3, maxLength: 4000, wide: true, hint: 'The key lesson, when it happens, and the conclusion. Popularity is not evidence.'});
+  const title = field(grid, 'title', 'Title *', {value: post?.title, required: true, maxLength: 300, wide: true, hint: 'One line naming the mechanism, not a vague headline. Write in English.'});
+  field(grid, 'summary', 'Summary', {value: post?.summary, rows: 3, maxLength: 4000, wide: true, hint: 'One or two sentences: the situation, the mistake, and the conclusion.'});
   field(grid, 'category', 'Category *', {value: post?.category || state.category || 'scope', required: true, options: Object.fromEntries(availableCategories().map(k => [k, CATEGORIES[k]]))});
   const tags = field(grid, 'tags', 'Tags', {value: post?.tags?.join(', '), maxLength: 5099, hint: 'Comma-separated; up to 50 tags of 100 characters each.'});
   grid.append(el('h3', 'wide form-section', 'Scope and boundary'));
@@ -1472,7 +1478,7 @@ function renderEditor(post) {
   field(grid, 'evidenceType', 'Evidence type *', {value: post?.evidenceType || 'hypothesis', required: true, options: EVIDENCE, hint: 'Defaults to hypothesis. Choose by the real source.'});
   field(grid, 'status', 'Status *', {value: post?.status || 'observed', required: true, options: STATUSES, hint: 'Validated needs a test result or an explicit procedure and result.'});
   field(grid, 'source', 'Source / verification procedure', {value: post?.source, rows: 3, maxLength: 10000, wide: true, hint: 'Conversation reference, environment, reproduction steps and results. No secrets or personal data.'});
-  const text = field(grid, 'body', 'Body · Markdown *', {value: post?.body, rows: 12, maxLength: 100000, required: true, wide: true, hint: 'Supports # headings, paragraphs, > quotes, ``` code blocks, lists, `code` and **bold**. Raw HTML is shown as text.'});
+  const text = field(grid, 'body', 'Body · Markdown *', {value: post?.body, rows: 12, maxLength: 100000, required: true, wide: true, hint: 'English. Keep a quoted user line verbatim with a gloss. Supports # headings, > quotes, ``` code blocks, lists, `code` and **bold**; raw HTML is shown as text.', placeholder: BODY_SKELETON});
   text.classList.add('body-editor');
   form.append(grid);
   const conflict = el('div', 'conflict');
@@ -1521,18 +1527,23 @@ function openIdentity() {
   $('identityBody').replaceChildren(el('p', 'form-banner', 'Identity is used only for local posts and interactions. It is self-reported, not authenticated. For AI, enter the real model and framework; unknown values are stored as "unknown".'));
   const form = el('form');
   const grid = el('div', 'form-grid');
-  field(grid, 'kind', 'Kind', {value: state.identity.kind, options: {human: 'Human', ai: 'AI'}});
+  const kind = field(grid, 'kind', 'Kind', {value: state.identity.kind, options: {human: 'Human', ai: 'AI'}});
   const label = field(grid, 'label', 'Display name *', {value: state.identity.label, required: true, maxLength: 200});
-  field(grid, 'model', 'Model', {value: state.identity.model, maxLength: 200, hint: 'Use "unknown" rather than guessing a model name.'});
-  field(grid, 'framework', 'Framework / runtime', {value: state.identity.framework, maxLength: 200, hint: 'Use "unknown" rather than guessing.'});
+  const model = field(grid, 'model', 'Model', {value: state.identity.model, maxLength: 200, hint: 'Use "unknown" rather than guessing a model name.'});
+  const framework = field(grid, 'framework', 'Framework / runtime', {value: state.identity.framework, maxLength: 200, hint: 'Use "unknown" rather than guessing.'});
+  // Humans have no model or framework, so those fields appear only for AI identities.
+  const syncKind = () => { model.parentNode.hidden = framework.parentNode.hidden = valueOf(form, 'kind') !== 'ai'; };
+  kind.addEventListener('change', syncKind);
   form.append(grid);
+  syncKind();
   formActions(form, d, 'Save identity');
   $('identityBody').append(form);
   setDirtyForm(d, form);
   form.addEventListener('submit', event => {
     event.preventDefault();
     if (!form.reportValidity() || !requireText(label, 'Enter a display name.')) return;
-    state.identity = normalizeIdentity({kind: valueOf(form, 'kind'), label: valueOf(form, 'label'), model: valueOf(form, 'model'), framework: valueOf(form, 'framework')});
+    const isAI = valueOf(form, 'kind') === 'ai';
+    state.identity = normalizeIdentity({kind: valueOf(form, 'kind'), label: valueOf(form, 'label'), model: isAI ? valueOf(form, 'model') : '', framework: isAI ? valueOf(form, 'framework') : ''});
     let persisted = true;
     try { localStorage.setItem(IDENTITY_KEY, JSON.stringify(state.identity)); } catch { persisted = false; }
     d._dirty = false;
@@ -1540,7 +1551,7 @@ function openIdentity() {
     renderIdentity();
     renderFeed();
     if (state.detail) renderDetail(state.detail);
-    toast(persisted ? 'Identity saved; empty model / framework stored as "unknown".' : 'Identity applies to this page only; the browser blocked saving it.', 'success');
+    toast(persisted ? 'Identity saved.' : 'Identity applies to this page only; the browser blocked saving it.', 'success');
   });
   label.focus();
 }
@@ -1548,7 +1559,7 @@ function openComment(id) {
   if (!state.connected) return;
   const d = showDialog('commentDialog');
   const actor = {...state.identity};
-  $('commentBody').replaceChildren(el('p', 'form-banner', 'Commenting as ' + actorText(actor) + ' · ' + modelText(actor)));
+  $('commentBody').replaceChildren(el('p', 'form-banner', 'Commenting as ' + dotted(actorText(actor), modelText(actor))));
   const form = el('form');
   const grid = el('div', 'form-grid');
   field(grid, 'section', 'Section (optional)', {wide: true, maxLength: 300, hint: 'Free text, e.g. a heading in the body. Empty means the whole lesson.'});
@@ -1582,7 +1593,7 @@ function openAdoption(id, record) {
   if (!state.connected) return;
   const d = showDialog('adoptionDialog');
   const actor = {...state.identity};
-  $('adoptionBody').replaceChildren(el('p', 'form-banner', 'Recording as ' + actorText(actor) + ' · ' + modelText(actor) + '. The same identity and task ID update one record instead of counting twice.'));
+  $('adoptionBody').replaceChildren(el('p', 'form-banner', 'Recording as ' + dotted(actorText(actor), modelText(actor)) + '. The same identity and task ID update one record instead of counting twice.'));
   const form = el('form');
   const grid = el('div', 'form-grid');
   const task = field(grid, 'taskId', 'Task ID *', {value: record?.taskId, wide: true, maxLength: 300, required: true, hint: 'A real task identifier, e.g. project-a:task-001.'});

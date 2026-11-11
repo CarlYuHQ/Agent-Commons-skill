@@ -230,7 +230,7 @@ function environment({protocol = 'http:', posts = [], fail = false, storageValue
   context.window = {addEventListener() {}};
   vm.createContext(context);
   // Expose internals only inside the test process; the shipped page has no debug hooks.
-  const instrumented = source.replace(/\}\)\(\);\s*$/, 'globalThis.ui={state,renderMarkdown,actorKey,normalizeIdentity,likedBy,logo,loadPosts,connect,offline,openEditor,openDetail,openIdentity,openComment,openAdoption,toggleLike,closeDialog,sortedPosts,displayName};})();');
+  const instrumented = source.replace(/\}\)\(\);\s*$/, 'globalThis.ui={state,renderMarkdown,actorKey,normalizeIdentity,likedBy,logo,loadPosts,connect,offline,openEditor,openDetail,openIdentity,openComment,openAdoption,toggleLike,closeDialog,sortedPosts,displayName,modelText};})();');
   assert.notEqual(instrumented, source, 'instrumentation hook applied');
   vm.runInContext(instrumented, context, {filename: htmlPath});
   return {context, document, ui: context.ui, requests, timers, savedIdentity, store, $: id => document.getElementById(id)};
@@ -248,7 +248,7 @@ async function run() {
   for (const dialog of file.document.querySelectorAll('dialog')) assert(file.$(dialog.getAttribute('aria-labelledby')), 'every dialog has an accessible title');
   assert(file.$('toast').getAttribute('aria-live'));
   assert.equal(file.requests.length, 0); assert(!file.ui.state.connected); assert(file.$('newPostBtn').disabled);
-  assert(file.$('connectionMessage').textContent.includes('Start scripts/commons.py serve')); assert(!polling(file));
+  assert(file.$('connectionMessage').textContent.includes('python scripts/commons.py serve')); assert(file.$('reconnectBtn').hidden, 'retrying cannot help under file://'); assert(!polling(file));
   ok('file:// makes no API calls, stores nothing, and does not poll');
 
   const e = environment(); await flush();
@@ -260,6 +260,18 @@ async function run() {
   assert.equal(e.ui.state.identity.model, 'unknown'); assert.equal(e.ui.state.identity.framework, 'unknown');
   assert.equal(e.savedIdentity.length, 1); assert.equal(e.savedIdentity[0].key, 'agent-commons.current-identity');
   ok('self-reported identity; empty AI model/framework normalize to unknown; only identity hits localStorage');
+
+  // Humans have no model or framework: the fields are hidden and nothing "unknown / unknown" is shown.
+  e.ui.openIdentity(); f = e.$('identityBody').querySelector('form');
+  assert.equal(f.elements.namedItem('kind').value, 'ai'); assert(!f.elements.namedItem('model').parentNode.hidden, 'AI identities show model and framework');
+  await input(f, 'model', 'typed-model'); await input(f, 'kind', 'human');
+  assert(f.elements.namedItem('model').parentNode.hidden); assert(f.elements.namedItem('framework').parentNode.hidden); await f.emit('submit');
+  assert.equal(e.ui.state.identity.kind, 'human'); assert.equal(e.ui.state.identity.model, 'unknown', 'a human never keeps a typed model');
+  assert.equal(e.ui.modelText({kind: 'human', model: 'unknown', framework: 'unknown'}), '');
+  assert.equal(e.ui.modelText({kind: 'ai', model: 'm', framework: ''}), 'm / unknown');
+  e.ui.openIdentity(); f = e.$('identityBody').querySelector('form');
+  await input(f, 'kind', 'ai'); await input(f, 'label', 'actual-operator'); await input(f, 'model', ''); await input(f, 'framework', ''); await f.emit('submit');
+  ok('identity form hides model/framework for humans; human banners never read "unknown / unknown"');
 
   assert.equal(e.ui.displayName({kind: 'ai', label: '', model: 'model-x', framework: 'fw'}), 'model-x');
   assert.equal(e.ui.displayName({kind: 'ai', label: 'reviewer', model: 'model-x', framework: 'fw'}), 'reviewer');
@@ -279,6 +291,8 @@ async function run() {
   ok('actor key matches the backend; author glyph is stable');
 
   await e.ui.openEditor(); f = e.$('editorBody').querySelector('form');
+  assert(e.$('editorBody').textContent.includes('Write in English')); assert(f.elements.namedItem('body').placeholder.includes('## Situation and goal'));
+  assert.equal(f.elements.namedItem('body').value, '', 'the skeleton is a placeholder and is never stored'); assert(!e.$('editorBody').textContent.includes('Popularity is not evidence'));
   assert.equal(f.elements.namedItem('status').value, 'observed'); assert.equal(f.elements.namedItem('evidenceType').value, 'hypothesis');
   await input(f, 'title', 'New test lesson'); await input(f, 'body', '# Lesson\nBody'); await input(f, 'summary', 'Full summary'); await input(f, 'category', 'tools');
   // The full-width comma must split tags too.
