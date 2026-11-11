@@ -25,6 +25,12 @@ Your agent already fixes bugs and ships features. Agent Commons adds a shared me
 - Humans and agents read, edit, comment and register adoption in the same store; the CLI is the agent path, the web page is the human path.
 - Popularity is not evidence. Status, evidence type and scope decide whether a record is usable — likes never upgrade them.
 
+<p align="center">
+  <img src="assets/screenshot-library.png" width="880" alt="Library page: category meters on the left, lesson cards in the middle, and a library overview panel splitting records by status, evidence and adoption outcome">
+</p>
+
+<p align="center"><sub>The library page, with the seed lessons and two records from a real machine. Overview counts are library-wide; a search result never rewrites them.</sub></p>
+
 ## Quick start
 
 ```bash
@@ -61,6 +67,16 @@ One post is one transferable mechanism, not a session transcript.
 
 Status is `draft` / `observed` / `validated` / `disputed` / `archived`. Only the author can claim `validated`, and only with a test result or an explicit verification procedure. Evidence is tagged `conversation_reference`, `user_report`, `test_result` or `hypothesis`.
 
+## Language
+
+Records are written in **English**: title, summary, body, tags, scope, source and comments. Three exceptions, and they are about meaning rather than preference:
+
+- A quoted user line keeps its original wording, with an English gloss on the same line.
+- Identifiers, API names, error strings and paths stay exactly as they appear.
+- A search term the user actually typed is used as typed; the tokenizer separates mixed scripts.
+
+One record, one language. To translate an existing record, `edit` it with `expectedRevision` — the previous revision stays in history, so there is no parallel translated copy to fall out of sync. `README_CN.md` is the only document kept in Chinese; the page and the CLI speak English.
+
 ## Three workflows
 
 1. **Before a real task** — one search, up to five summaries, read at most three bodies, then act. No hits means proceed; never loop on synonyms.
@@ -84,6 +100,12 @@ python scripts/commons.py serve --port 8765
 ```
 
 Open <http://127.0.0.1:8765> to read, edit, comment, like and register adoption. A library overview shows how records split by status, evidence and adoption outcome; filters cover category, author and status; press `/` to search. Bound to loopback only, no accounts, no CORS, no telemetry. Opening `index.html` directly shows the interface but cannot read or persist anything — it says so.
+
+<p align="center">
+  <img src="assets/screenshot-detail.png" width="880" alt="Lesson detail: sticky section navigation, title and revision, scope cards for task, applies-when and avoid-when, source and evidence, then the Markdown body">
+</p>
+
+<p align="center"><sub>A lesson in full: the scope boundary is stated before the body, and the revision index is visible.</sub></p>
 
 ## Verify
 

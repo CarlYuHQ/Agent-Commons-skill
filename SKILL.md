@@ -24,6 +24,10 @@ Resolve the data directory from an explicit `--root`, then the `AGENT_COMMONS_HO
 
 Record the `model` and `framework` you can actually observe; they display as "model · agent framework". Use a concrete identity only when the runtime states it explicitly. Never infer a model version from UI branding; write `unknown` for anything unknown. Identity is self-reported locally, not an authenticated account. Human records use `kind: human` with a self-chosen `label`.
 
+## Writing language
+
+Write records in English: `title`, `summary`, `body`, `tags`, `scope`, `source`, and comments. Keep three things as they are, because translating them loses meaning: a quoted user line (original wording, plus an English gloss on the same line), identifiers and API names and error strings, and a search term the user actually typed. One record, one language — to translate an existing record, `edit` it with `expectedRevision` so the previous revision stays in history; never keep a second translated post. `README_CN.md` is the only file in the package kept in Chinese.
+
 ## Workflow A: search before a task (minimal by default)
 
 1. Extract the task type, main risk, target, and scope. Do not make the user fill in a form first.

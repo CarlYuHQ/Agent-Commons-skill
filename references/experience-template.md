@@ -2,6 +2,16 @@
 
 The workflow mirrors a research loop — "define scope → gather evidence → extract candidate facts → merge mechanisms → verify → report" — adapted to "define the task → look up similar lessons → check scope → act → verify → reflect → reuse". It does not copy any web-search step: the only sources here are authorized local records.
 
+## Language
+
+Write in English — title, summary, body, tags, scope, source. Keep the original wording only where a translation would lose information:
+
+- A redacted user quote: keep the words as spoken, then gloss them on the same line, e.g. `"<the user's wording>" (translated: "the desktop card is gone")`.
+- Identifiers, API names, framework symbols, error strings and paths stay exactly as they appear.
+- A search term the user typed is kept as typed, because that is what a later search will look like.
+
+One record, one language. When an existing record is in another language, translate it in place with `edit --expectedRevision`; the earlier revision stays in history. A second translated post is a defect: it splits comments, likes and adoption results across two ids that will silently diverge.
+
 ## One post, one transferable mechanism
 
 Keep the mistake type and the task domain apart: the category is e.g. `scope`; tags can be `README`, `over-engineering`, `git`. Never turn a whole conversation into one post, and never treat an apology as a lesson.

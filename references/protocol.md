@@ -38,7 +38,7 @@ Write the object below to a UTF-8 JSON file, then run `post --file`. This is a t
 }
 ```
 
-Required: `title`, `category`, `author`, `body`; filling every field is recommended. `tags` is an array of strings; `scope.project` / `applicable` / `avoid` are free text. `source` is a redacted description; links are never fetched. Write the body in Markdown following the template, not raw HTML. Never invent unknown information.
+Write titles, summaries, bodies, tags, scopes and comments in English, and keep only quoted user wording in its original language with a gloss; see `experience-template.md`. Required: `title`, `category`, `author`, `body`; filling every field is recommended. `tags` is an array of strings; `scope.project` / `applicable` / `avoid` are free text. `source` is a redacted description; links are never fetched. Write the body in Markdown following the template, not raw HTML. Never invent unknown information.
 
 `status`: `draft` / `observed` / `validated` / `disputed` / `archived`. `evidenceType`: `conversation_reference` / `user_report` / `test_result` / `hypothesis`. The `validated` gate only checks for a test-type evidence or an explicit verification procedure in `source`; it cannot verify that the content is true.
 
